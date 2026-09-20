@@ -1,6 +1,7 @@
 import {useState,useRef} from 'react';
 import {ArrowUpRight,ArrowLeft,ArrowRight,Maximize2,X} from 'lucide-react';
 import sections from './build-guide.json';
+import FirmwareGuide from './FirmwareGuide';
 const allSteps=sections.flatMap((section,chapter)=>section.steps.map(step=>({...step,chapter,chapterTitle:section.title,intro:section.intro})));
 export default function BuildGuide(){
  const [index,setIndex]=useState(0),[zoom,setZoom]=useState(false),title=useRef(null),dialog=useRef(null);const step=allSteps[index];
@@ -13,5 +14,6 @@ export default function BuildGuide(){
  <article className="wizard-step"><div className="wizard-title"><span className="eyebrow">{step.chapterTitle}</span><h3 ref={title} tabIndex={-1}>{String(index+1).padStart(2,'0')} / {step.title}</h3><p>{step.intro}</p></div><button className="guide-image" onClick={enlarge} aria-label={`Enlarge diagram for step ${index+1}`}><img src={`/guide/step-${String(index+1).padStart(2,'0')}.svg`} alt={`Step ${index+1}: ${step.title}. Labeled component placement and connection diagram.`}/><span><Maximize2 size={15}/>Enlarge diagram</span></button><div className="step-instructions"><h4>What to do</h4><p>{step.text}</p></div></article>
  <div className="wizard-navigation"><button onClick={()=>go(index-1)} disabled={index===0}><ArrowLeft size={18}/>Previous</button><span>{index===19?'Finished assembly · ready for a careful bench check':`Up next: ${allSteps[index+1].title}`}</span><button className="primary" onClick={()=>go(index+1)} disabled={index===allSteps.length-1}>Next<ArrowRight size={18}/></button></div>{index===19&&<button className="restart-guide" onClick={()=>go(0)}>Back to the first step</button>}
  <div className="guide-callout"><strong>Use the actual component specifications</strong><p>Images are connection and placement diagrams, not scale drawings. The screw insertion is ½ inch; match spring spacing to the real actuator stroke. Verify coil ratings, sensor supply, relay logic and firmware before powering the mechanism.</p></div>
+ <FirmwareGuide/>
  {zoom&&<dialog ref={dialog} className="guide-dialog" onClose={()=>setZoom(false)} onClick={e=>{if(e.target===dialog.current)dialog.current.close()}}><button autoFocus aria-label="Close enlarged diagram" onClick={()=>dialog.current.close()}><X/></button><img src={`/guide/step-${String(index+1).padStart(2,'0')}.svg`} alt={`Full-size diagram: ${step.title}`}/></dialog>}</section>
 }

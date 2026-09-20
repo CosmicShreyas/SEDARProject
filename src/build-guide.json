@@ -1,30 +1,106 @@
 [
- {"title":"Place and assemble the hardware","intro":"Build the mechanism with all power disconnected. The 3D view shows arrangement, not fabrication dimensions.","steps":[
- {"title":"Check the actual parts","text":"Record the solenoid voltage, current, stroke, force, return action and duty cycle; spring free length and rate; platform mass; relay input logic and DC inductive contact rating; and the exact sensor breakout voltage requirements. Use four matching springs. Choose an adapter and wiring rated for the combined load."},
- {"title":"Lay out four spring centers","text":"Mark S1 and S2 as one row, S3 and S4 as the other. Center one solenoid between each pair. Keep both rows parallel. Reduce spring spacing until the real plunger can reach its intended spring contact within its rated stroke, while retaining clearance for the opposite end. The slightly longer rod in the illustration is not an instruction to extend a real plunger."},
- {"title":"Fit the base screws and longer springs","text":"Fix one screw securely to the base at each corner. Use a retained lower spring seat and suitable washer/nut arrangement. Each screw must enter its spring by 1/2 inch (12.7 mm), measured from the lower end of the spring. Select screw diameter to clear the spring bore; total screw length also includes base thickness and fastening hardware. Leave the rest of the spring free to flex."},
- {"title":"Seat the platform and mount the coils","text":"Retain the four upper spring ends under the platform so they cannot slip out during the demonstration. The corner screws must not clamp the upper platform rigidly to the ground base. Fasten the coil bodies to low brackets on the base, centered within the spring pairs. Mirror the units: channel 1's energized stroke points left, channel 2's points right. Align the short plunger with a spring-contact collar; the contact design is provisional and needs a bench check."},
- {"title":"Place the building and electronics","text":"Secure the building centrally on the platform. Rigidly mount the MPU6050 on the roof and mark its axes. Keep the Nano, buck converter, relay module and power distribution on an insulated, accessible area of the base outside the moving mechanism. Route a flexible sensor cable loop to the roof. Move the platform by hand to verify clearance, retained spring ends and no binding."}
- ]},
- {"title":"Wire the low-voltage control circuit","intro":"Keep the solenoid power branch disconnected during these steps. Use the component terminal labels, not wire colors alone.","steps":[
- {"title":"Make the supply distribution","text":"With the adapter unplugged, route its positive output through the main switch and an appropriately rated fuse to the switched 12 V distribution point. Route adapter negative to a separate common-ground terminal. Select fuse and cable ratings from actual load specifications; do not route coil current through a solderless breadboard or Nano pins."},
- {"title":"Set the LM2596 output first","text":"Connect buck IN+ to switched 12 V and IN- to common ground. Leave all output loads disconnected. Power only the buck, measure OUT+ to OUT- with a multimeter, and adjust to 5.0 V. Switch off and unplug the adapter before making the next connections."},
- {"title":"Power the Nano and relay logic","text":"Connect regulated OUT+ to the classic Nano 5V pin and relay VCC; connect OUT- to their GND terminals. Do not feed regulated 5 V into VIN. This guide assumes a relay module with onboard drivers and a documented VCC/GND logic connection. Follow the particular module's JD-VCC/isolation instructions if its arrangement differs. Avoid simultaneous USB and external power unless the board's power arrangement is verified."},
- {"title":"Connect the roof sensor","text":"Power the MPU6050 breakout only at its documented voltage; use a suitable 3.3 V source or level translation if required. A regulator on a breakout does not establish I2C logic tolerance. Connect sensor GND to common ground, SDA to Nano A4 and SCL to A5. Optional INT goes to D2. AD0 may connect to GND for address 0x68. Leave XDA and XCL unused. Keep this cable away from coil wiring."},
- {"title":"Connect and verify relay inputs","text":"Connect Nano D8 to IN1 and D9 to IN2. Verify whether the relay board is active-LOW or active-HIGH using its documentation. With the 12 V contact branch still disconnected, test each relay independently with a simple known test sketch. Both channels must default OFF at startup and on a sensor fault. Firmware is not supplied by the frontend and must match the actual module."}
- ]},
- {"title":"Wire the solenoid power branch","intro":"Disconnect all power before wiring. Relay contact terminals COM/NO/NC are separate from the module's logic pins.","steps":[
- {"title":"Feed the two COM terminals","text":"Connect switched 12 V to channel 1 COM and channel 2 COM. Leave both NC terminals unused. Use a meter and the module markings to confirm terminal order; do not infer the order from the blue housing orientation."},
- {"title":"Connect each coil through NO","text":"Connect channel 1 NO to solenoid 01 positive. Connect channel 2 NO to solenoid 02 positive. Return each solenoid negative directly to the common-ground distribution point using its own appropriately sized path. Keep these high-current returns separate from the sensor ground wire until the common point."},
- {"title":"Add the two flyback diodes","text":"Place one suitable flyback diode across each coil, close to the solenoid terminals. Connect the striped cathode to coil positive (the relay NO side) and the anode to coil negative. Confirm polarity before applying power: a reversed diode can short the supply when the relay closes. Choose the diode for the coil current, reverse voltage and desired release behavior."},
- {"title":"Inspect the complete wiring","text":"With power off, check for 12 V-to-ground shorts, loose strands, exposed conductors and mistaken relay terminals. Verify the buck still feeds only the control supply and the sensor receives its specified voltage. Confirm both solenoid positive wires are disconnected by inactive relay contacts. Confirm the physical switch removes the 12 V input."},
- {"title":"Test one actuator at a time","text":"Keep the model clear and start with a brief pulse within the coil's duty rating. Observe the actual plunger direction and return action, then test the other channel. Check that no rod hits the platform, jams a spring or exceeds travel. Stop on binding or abnormal heating. Correct mounting or control polarity before enabling feedback."}
- ]},
- {"title":"Commission the complete prototype","intro":"The website uses idealized forces. Real control must be tuned to the actual sensor, relays, coils and mechanical contact.","steps":[
- {"title":"Establish a sensor baseline","text":"Keep the platform still, verify sensor communication, log acceleration and angular rate, and estimate stationary offsets. Mark which sensor axis aligns with the two solenoids. Confirm readings change in the expected direction when the platform is gently moved."},
- {"title":"Record a passive test","text":"Leave the actuator outputs disabled and apply a small repeatable base movement. Record the input method, peak building response and settling time. Use the same model mass and initial conditions for subsequent comparisons. A roof sensor alone does not provide an independent ground-motion record."},
- {"title":"Implement conservative feedback","text":"Use firmware that reads and filters motion, estimates the relevant movement, selects an opposing response, and releases each actuator appropriately. Include hysteresis, minimum switching intervals, maximum on-time, and default-OFF behavior for startup or sensor failure. Acceleration sign alone is not velocity direction; do not copy the continuous web damping force directly into relay switching."},
- {"title":"Compare and tune gradually","text":"Repeat the same small base input with feedback enabled. Compare the traces and settling time against the passive run, and inspect for unwanted twisting caused by the offset actuators. If movement increases, stop and check direction, timing, sensor orientation and contact geometry. Tune one parameter at a time; do not increase excitation to hide a poor response."},
- {"title":"Prepare the college demonstration","text":"Secure the base, retain the springs, cover exposed power terminals, label all components and keep the power switch accessible. Demonstrate sensing first, then individual actuators, then passive versus controlled motion. Explain that the current mechanism is active solenoid response, not a proven eddy-current damping stage or a full-scale building protection system."}
- ]}
+  {
+    "title": "Place and assemble the hardware",
+    "intro": "Build the mechanism with all power disconnected. The 3D view shows arrangement, not fabrication dimensions.",
+    "steps": [
+      {
+        "title": "Check the actual parts",
+        "text": "Record the solenoid voltage, current, stroke, force, return action and duty cycle; spring free length and rate; platform mass; relay input logic and DC inductive contact rating; and the exact sensor breakout voltage requirements. Use four matching springs. Choose an adapter and wiring rated for the combined load."
+      },
+      {
+        "title": "Lay out four spring centers",
+        "text": "Mark S1 and S2 as one row, S3 and S4 as the other. Center one solenoid between each pair. Keep both rows parallel. Reduce spring spacing until the real plunger can reach its intended spring contact within its rated stroke, while retaining clearance for the opposite end. The slightly longer rod in the illustration is not an instruction to extend a real plunger."
+      },
+      {
+        "title": "Fit the base screws and longer springs",
+        "text": "Fix one screw securely to the base at each corner. Use a retained lower spring seat and suitable washer/nut arrangement. Each screw must enter its spring by 1/2 inch (12.7 mm), measured from the lower end of the spring. Select screw diameter to clear the spring bore; total screw length also includes base thickness and fastening hardware. Leave the rest of the spring free to flex."
+      },
+      {
+        "title": "Seat the platform and mount the coils",
+        "text": "Retain the four upper spring ends under the platform so they cannot slip out during the demonstration. The corner screws must not clamp the upper platform rigidly to the ground base. Fasten the coil bodies to low brackets on the base, centered within the spring pairs. Mirror the units: channel 1's energized stroke points left, channel 2's points right. Align the short plunger with a spring-contact collar; the contact design is provisional and needs a bench check."
+      },
+      {
+        "title": "Place the building and electronics",
+        "text": "Secure the building centrally on the platform. Rigidly mount the MPU6050 on the roof and mark its axes. Keep the Nano, buck converter, relay module and power distribution on an insulated, accessible area of the base outside the moving mechanism. Route a flexible sensor cable loop to the roof. Move the platform by hand to verify clearance, retained spring ends and no binding."
+      }
+    ]
+  },
+  {
+    "title": "Wire the low-voltage control circuit",
+    "intro": "Keep the solenoid power branch disconnected during these steps. Use the component terminal labels, not wire colors alone.",
+    "steps": [
+      {
+        "title": "Make the supply distribution",
+        "text": "With the adapter unplugged, route its positive output through the main switch and an appropriately rated fuse to the switched 12 V distribution point. Route adapter negative to a separate common-ground terminal. Select fuse and cable ratings from actual load specifications; do not route coil current through a solderless breadboard or Nano pins."
+      },
+      {
+        "title": "Set the LM2596 output first",
+        "text": "Connect buck IN+ to switched 12 V and IN- to common ground. Leave all output loads disconnected. Power only the buck, measure OUT+ to OUT- with a multimeter, and adjust to 5.0 V. Switch off and unplug the adapter before making the next connections."
+      },
+      {
+        "title": "Power the Nano and relay logic",
+        "text": "Connect regulated OUT+ to the classic Nano 5V pin and relay VCC; connect OUT- to their GND terminals. Do not feed regulated 5 V into VIN. This guide assumes a relay module with onboard drivers and a documented VCC/GND logic connection. Follow the particular module's JD-VCC/isolation instructions if its arrangement differs. Avoid simultaneous USB and external power unless the board's power arrangement is verified."
+      },
+      {
+        "title": "Connect the roof sensor",
+        "text": "Power the MPU6050 breakout only at its documented voltage; use a suitable 3.3 V source or level translation if required. A regulator on a breakout does not establish I2C logic tolerance. Connect sensor GND to common ground, SDA to Nano A4 and SCL to A5. Optional INT goes to D2. AD0 may connect to GND for address 0x68. Leave XDA and XCL unused. Keep this cable away from coil wiring."
+      },
+      {
+        "title": "Connect and verify relay inputs",
+        "text": "Connect Nano D8 to IN1 and D9 to IN2. Download the SEDAR Nano sketch below and set RELAY_ACTIVE_LOW to match the module. Upload with the 12 V coil branch disconnected. After stationary calibration, use TEST1 and TEST2 in Serial Monitor at 115200 baud to check that each relay briefly closes COM-NO and returns OFF. Confirm startup and sensor faults leave both outputs OFF. Read the included commissioning guide before powering coils."
+      }
+    ]
+  },
+  {
+    "title": "Wire the solenoid power branch",
+    "intro": "Disconnect all power before wiring. Relay contact terminals COM/NO/NC are separate from the module's logic pins.",
+    "steps": [
+      {
+        "title": "Feed the two COM terminals",
+        "text": "Connect switched 12 V to channel 1 COM and channel 2 COM. Leave both NC terminals unused. Use a meter and the module markings to confirm terminal order; do not infer the order from the blue housing orientation."
+      },
+      {
+        "title": "Connect each coil through NO",
+        "text": "Connect channel 1 NO to solenoid 01 positive. Connect channel 2 NO to solenoid 02 positive. Return each solenoid negative directly to the common-ground distribution point using its own appropriately sized path. Keep these high-current returns separate from the sensor ground wire until the common point."
+      },
+      {
+        "title": "Add the two flyback diodes",
+        "text": "Place one suitable flyback diode across each coil, close to the solenoid terminals. Connect the striped cathode to coil positive (the relay NO side) and the anode to coil negative. Confirm polarity before applying power: a reversed diode can short the supply when the relay closes. Choose the diode for the coil current, reverse voltage and desired release behavior."
+      },
+      {
+        "title": "Inspect the complete wiring",
+        "text": "With power off, check for 12 V-to-ground shorts, loose strands, exposed conductors and mistaken relay terminals. Verify the buck still feeds only the control supply and the sensor receives its specified voltage. Confirm both solenoid positive wires are disconnected by inactive relay contacts. Confirm the physical switch removes the 12 V input."
+      },
+      {
+        "title": "Test one actuator at a time",
+        "text": "Keep the model clear and start with a brief pulse within the coil's duty rating. Observe the actual plunger direction and return action, then test the other channel. Check that no rod hits the platform, jams a spring or exceeds travel. Stop on binding or abnormal heating. Correct mounting or control polarity before enabling feedback."
+      }
+    ]
+  },
+  {
+    "title": "Commission the complete prototype",
+    "intro": "Start with measurements and individual actuator tests. The supplied firmware does not enable unvalidated automatic stabilization.",
+    "steps": [
+      {
+        "title": "Establish a sensor baseline",
+        "text": "Keep the platform still, verify sensor communication, log acceleration and angular rate, and estimate stationary offsets. Mark which sensor axis aligns with the two solenoids. Confirm readings change in the expected direction when the platform is gently moved."
+      },
+      {
+        "title": "Record a passive test",
+        "text": "Leave the actuator outputs disabled and apply a small repeatable base movement. Record the input method, peak building response and settling time. Use the same model mass and initial conditions for subsequent comparisons. A roof sensor alone does not provide an independent ground-motion record."
+      },
+      {
+        "title": "Upload and check the Nano firmware",
+        "text": "Open SEDAR_Nano.ino from the download below. Select classic Arduino Nano / ATmega328P and upload. Keep the roof sensor flat and still for four seconds. The default build provides calibration, telemetry, TEST1, TEST2 and STOP; ARM is locked because the feedback law has not been validated on your mechanism. Check sensor axis, relay polarity, resulting force direction, delay and unwanted yaw. Read REALITY_CHECK.md before considering experimental feedback."
+      },
+      {
+        "title": "Compare and tune gradually",
+        "text": "Compare small repeatable passive trials and carefully observed individual pulses. Record the same mass, base movement and starting position. If a pulse increases motion or twisting, stop and revise force direction, timing or contact geometry. Opposite forces in opposite rows can create yaw in the same direction. Do not enable the experimental feedback setting merely to make the demonstration look better; first establish suitable hardware ratings and measured behavior."
+      },
+      {
+        "title": "Prepare the college demonstration",
+        "text": "Secure the base, retain the springs, cover exposed power terminals, label all components and keep the power switch accessible. Demonstrate sensing first, then individual actuators, then passive versus controlled motion. Explain that the current mechanism is active solenoid response, not a proven eddy-current damping stage or a full-scale building protection system."
+      }
+    ]
+  }
 ]

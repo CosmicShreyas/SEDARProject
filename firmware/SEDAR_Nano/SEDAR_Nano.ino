@@ -1,6 +1,6 @@
 /*
   SEDAR -- four-spring college demonstrator, classic Arduino Nano (ATmega328P)
-  Revision 1.0. Read ../README.md BEFORE connecting the 12 V coil branch.
+  Revision 1.3, selective relay pulse policy. Read ../README.md before coil power.
 
   Hardware: roof MPU6050, two DRIVER-equipped relay module inputs, two
   mirrored spring-contact solenoids. Nano outputs NEVER drive coils directly.
@@ -8,7 +8,8 @@
 
   No third-party libraries: Wire is included in Arduino AVR Boards.
   Serial Monitor: 115200 baud, Newline. Boot -> calibrate -> MONITOR only.
-  Commands: HELP STATUS CAL TEST1 TEST2 ARM STOP STREAM ON STREAM OFF
+  Commands: HELP STATUS CALIBRATE (or CAL) TEST1 TEST2 ARM STOP
+            STREAM ON / STREAM OFF
 
   This is a conservative experimental controller, not a validated seismic
   protection system. It cannot know spring displacement or ground acceleration
@@ -17,13 +18,27 @@
   delay, sensor tilt and relay delay can make a pulse ADD energy. Compare
   passive/active trials and STOP if motion or twisting increases.
 */
+// ============================================================================
+// 01 / LIBRARIES
+// Wire talks to the MPU6050 over I2C; the other headers provide math and command parsing.
+// ============================================================================
 #include <Wire.h>
 #include <math.h>
 #include <string.h>
 #include <ctype.h>
+#include "PulsePolicy.h"
 
+// ============================================================================
+// 02 / USER SETTINGS AND LIMITS
+// Review pin assignments and hardware polarity here. Times are milliseconds unless marked otherwise.
+// ============================================================================
 // -------------------- SETTINGS TO VERIFY ON YOUR HARDWARE --------------------
 const uint8_t RELAY_PINS[2] = {8, 9};
+// NO validated stabilizing law is possible from the supplied hardware details.
+// Default build supports measurement and bounded individual actuator tests.
+// Only enable experimental feedback after measured direction/delay/contact tests
+// and repeatable passive/active trials. Enabling is NOT a stability guarantee.
+const bool ENABLE_EXPERIMENTAL_CONTROL = false;
 const bool RELAY_ACTIVE_LOW = true; // Change to false ONLY for active-HIGH modules.
 const uint8_t MOTION_AXIS = 0;      // 0=X, 1=Y. Mount that axis along actuator travel.
 const int8_t SENSOR_SIGN = 1;       // +1 or -1: defines positive motion direction.
@@ -33,6 +48,14 @@ constexpr int8_t CHANNEL_FORCE_SIGN[2] = {-1, 1}; // Verify with TEST1 / TEST2.
 // Starting bench values, NOT measured ratings of your unknown solenoids.
 const uint16_t PULSE_MS = 40;       // Reduce if the coil's specification requires it.
 const uint16_t HARD_MAX_ON_MS = 60;
+// Assumptions ONLY: measure closure, rod contact and complete force release.
+// These settings do not make the unmeasured hardware timing trustworthy.
+const uint16_t ACTUATION_DELAY_MS = 20;
+const uint16_t FORCE_RELEASE_MS = 35;
+const uint16_t TIMING_MARGIN_MS = 10;
+const uint16_t DIRECTION_CONFIRM_MS = 30;
+const float MAX_YAW_RATE_DPS = 15.0f;
+const uint16_t YAW_FAULT_DWELL_MS = 100;
 const uint16_t COOLDOWN_MS = 220;   // Both channels remain off between pulses.
 const uint16_t WINDOW_MS = 5000;
 const uint8_t MAX_PULSES_PER_WINDOW = 6; // <=240 ms commanded ON in a 5 s window.
@@ -50,8 +73,16 @@ const uint16_t CAL_SAMPLES = 400;   // Four seconds of stationary calibration.
 static_assert(MOTION_AXIS < 2, "Choose horizontal X or Y axis");
 static_assert(SENSOR_SIGN == 1 || SENSOR_SIGN == -1, "SENSOR_SIGN must be +/-1");
 static_assert(PULSE_MS <= HARD_MAX_ON_MS, "Pulse exceeds software on-time limit");
-static_assert(CHANNEL_FORCE_SIGN[0] != CHANNEL_FORCE_SIGN[1], "Channels must oppose");
+static_assert((CHANNEL_FORCE_SIGN[0] == -1 && CHANNEL_FORCE_SIGN[1] == 1)
+           || (CHANNEL_FORCE_SIGN[0] == 1 && CHANNEL_FORCE_SIGN[1] == -1), "Signs must be opposite +/-1");
+static_assert(PULSE_MS > 0 && COOLDOWN_MS >= HARD_MAX_ON_MS, "Check pulse/cooldown");
+static_assert(MAX_PULSES_PER_WINDOW > 0, "Pulse budget must be positive");
 
+// ============================================================================
+// 03 / RUNTIME STATE
+// These variables remember calibration, measurements, relay timing and console input.
+// They live in RAM: resetting the Nano clears them and requires calibration again.
+// ============================================================================
 struct Sample { float a[3]; float w[3]; }; // acceleration m/s^2; angular rate deg/s.
 uint8_t mpuAddress = 0;
 bool sensorReady = false, calibrated = false, calibrating = false;
@@ -59,18 +90,31 @@ bool faulted = false, armed = false, streaming = false;
 bool episode = false, waitingForQuiet = false, quietTracking = false;
 int8_t activeChannel = -1;
 bool manualPulse = false;
-uint32_t pulseStarted = 0, lastOff = 0, windowStarted = 0;
+uint32_t pulseStarted = 0, lastOff = 0;
+uint32_t pulseHistory[MAX_PULSES_PER_WINDOW] = {};
+uint8_t historyHead = 0, historyCount = 0;
 uint32_t episodeStarted = 0, quietStarted = 0, nextSample = 0, lastSample = 0;
 uint32_t lastReport = 0;
-uint8_t pulsesInWindow = 0;
+uint32_t lastConfigCheck = 0;
 uint16_t calCount = 0;
-float sumA[3] = {}, sumSqA[3] = {}, sumW[3] = {}, sumSqW[3] = {};
+// Welford means / sum of squared deviations avoid subtracting two large g^2 values.
+float meanA[3] = {}, m2A[3] = {}, meanW[3] = {}, m2W[3] = {};
+float measuredAccelSigma = 0, accelStartThreshold = ACCEL_START;
+float accelQuietThreshold = ACCEL_QUIET, gyroQuietThreshold = 2.0f;
+Sedar::DirectionGate directionGate;
+bool yawExceeded = false;
+uint32_t yawExceededSince = 0;
 float baselineA[3] = {}, gyroBias[3] = {}, gravity[3] = {};
 float dynamicA = 0, velocityEstimate = 0, tiltX = 0, tiltY = 0;
 char commandBuffer[24];
 uint8_t commandLength = 0;
 bool commandOverflow = false;
 
+// ============================================================================
+// 04 / RELAY OUTPUTS AND FAULT HANDLING
+// All relay writes go through these helpers. OFF is translated to the module polarity.
+// disarm() prevents automatic pulses; fault() also requires successful recalibration.
+// ============================================================================
 void writeRelay(uint8_t channel, bool on) {
   digitalWrite(RELAY_PINS[channel], (on == RELAY_ACTIVE_LOW) ? LOW : HIGH);
 }
@@ -81,7 +125,7 @@ void outputsOff() {
 }
 void disarm() {
   outputsOff(); armed = false; episode = false; waitingForQuiet = false;
-  quietTracking = false; velocityEstimate = 0;
+  quietTracking = false; velocityEstimate = 0; directionGate.reset();
 }
 void fault(const __FlashStringHelper *reason) {
   disarm(); faulted = true; calibrated = false; calibrating = false;
@@ -95,6 +139,11 @@ void servicePulse(uint32_t now) {
   if (age >= PULSE_MS || age >= HARD_MAX_ON_MS || faulted || !sensorReady
       || !calibrated || (!manualPulse && !armed)) outputsOff();
 }
+// ============================================================================
+// 05 / MPU6050 COMMUNICATION
+// Configure the sensor and convert signed raw registers into m/s^2 and degrees/second.
+// A failed I2C transaction returns false so the caller can switch outputs OFF.
+// ============================================================================
 bool writeRegister(uint8_t reg, uint8_t value) {
   Wire.beginTransmission(mpuAddress); Wire.write(reg); Wire.write(value);
   return Wire.endTransmission() == 0;
@@ -139,26 +188,44 @@ bool readSample(Sample &s) {
   }
   return true;
 }
+// ============================================================================
+// 06 / FLAT, STATIONARY CALIBRATION
+// CALIBRATE and CAL both enter this routine. Place the complete base on a level table;
+// the roof sensor must be rigid, flat and +Z up. Calibration measures a resting
+// baseline; it cannot physically level the building or determine actuator direction.
+// ============================================================================
 void beginCalibration() {
   disarm(); faulted = false; calibrated = false; calibrating = false;
   sensorReady = initSensor();
   if (!sensorReady) { fault(F("MPU6050 not found/configured; check power/SDA/SCL")); return; }
-  memset(sumA, 0, sizeof(sumA)); memset(sumSqA, 0, sizeof(sumSqA));
-  memset(sumW, 0, sizeof(sumW)); memset(sumSqW, 0, sizeof(sumSqW));
+  memset(meanA, 0, sizeof(meanA)); memset(m2A, 0, sizeof(m2A));
+  memset(meanW, 0, sizeof(meanW)); memset(m2W, 0, sizeof(m2W));
+  yawExceeded = false; gyroQuietThreshold = 2.0f;
   calCount = 0; calibrating = true; dynamicA = 0; velocityEstimate = 0;
   tiltX = 0; tiltY = 0; lastSample = micros(); nextSample = lastSample + SAMPLE_US;
-  Serial.println(F("CAL: keep roof sensor level and entire model still for 4 seconds."));
+  Serial.println(F("CAL: base on a flat table, roof sensor flat/+Z up. Keep still for 4 seconds."));
 }
 void calibrateSample(const Sample &s) {
+  ++calCount;
   for (uint8_t i=0; i<3; ++i) {
-    sumA[i] += s.a[i]; sumSqA[i] += s.a[i]*s.a[i];
-    sumW[i] += s.w[i]; sumSqW[i] += s.w[i]*s.w[i];
+    float da=s.a[i]-meanA[i]; meanA[i]+=da/calCount;
+    m2A[i]+=da*(s.a[i]-meanA[i]);
+    float dw=s.w[i]-meanW[i]; meanW[i]+=dw/calCount;
+    m2W[i]+=dw*(s.w[i]-meanW[i]);
   }
-  if (++calCount < CAL_SAMPLES) return;
+  // Report progress once per 100 fresh samples (approximately one second).
+  if (calCount % 100 == 0) {
+    Serial.print(F("CAL progress: ")); Serial.print(calCount);
+    Serial.println(F("/400 samples. Keep still."));
+  }
+  if (calCount < CAL_SAMPLES) return;
+  // Reject a moving/noisy baseline rather than storing misleading offsets.
   for (uint8_t i=0; i<3; ++i) {
-    baselineA[i] = sumA[i]/CAL_SAMPLES; gyroBias[i] = sumW[i]/CAL_SAMPLES;
-    float varA = sumSqA[i]/CAL_SAMPLES - baselineA[i]*baselineA[i];
-    float varW = sumSqW[i]/CAL_SAMPLES - gyroBias[i]*gyroBias[i];
+    baselineA[i] = meanA[i]; gyroBias[i] = meanW[i];
+    float varA = fmaxf(0,m2A[i]/(CAL_SAMPLES-1));
+    float varW = fmaxf(0,m2W[i]/(CAL_SAMPLES-1));
+    if (i==MOTION_AXIS) measuredAccelSigma=sqrtf(varA);
+    gyroQuietThreshold=fmaxf(gyroQuietThreshold,4.0f*sqrtf(varW));
     if (varA > 0.04f || varW > 1.0f || fabs(gyroBias[i]) > 10) {
       fault(F("Moved during calibration or excessive gyro bias")); return;
     }
@@ -169,18 +236,37 @@ void calibrateSample(const Sample &s) {
       || fabs(baselineA[1]) > 0.20f*G || baselineA[2] < 0.8f*G) {
     fault(F("Mount board flat, +Z up; check accelerometer readings")); return;
   }
+  // Four-sigma start / two-sigma quiet with fixed minimums: no online gain learning.
+  accelStartThreshold=Sedar::startThreshold(measuredAccelSigma,ACCEL_START);
+  accelQuietThreshold=Sedar::quietThreshold(measuredAccelSigma,ACCEL_QUIET);
   calibrating = false; calibrated = true;
   Serial.println(F("CAL OK. MONITOR: outputs disabled. HELP for next steps."));
 }
+// ============================================================================
+// 07 / LIMITED INDIVIDUAL ACTUATOR PULSES
+// TEST1/TEST2 and optional feedback share this gate: one channel, cooldown and
+// a rolling pulse budget. This controls commands, not actual measured coil force.
+// ============================================================================
 bool startPulse(uint8_t channel, bool manual, uint32_t now) {
   if (channel > 1 || activeChannel >= 0 || faulted || !sensorReady || !calibrated) return false;
+  if (!manual && (!ENABLE_EXPERIMENTAL_CONTROL || !armed)) return false;
   if (now-lastOff < COOLDOWN_MS) return false;
-  if (now-windowStarted >= WINDOW_MS) { windowStarted = now; pulsesInWindow = 0; }
-  if (pulsesInWindow >= MAX_PULSES_PER_WINDOW) return false;
+  // Rolling start-time budget: no fixed-window boundary burst. Unsigned elapsed
+  // subtraction handles millis rollover for these short time intervals.
+  while (historyCount && now-pulseHistory[historyHead] >= WINDOW_MS) {
+    historyHead = (historyHead+1)%MAX_PULSES_PER_WINDOW; --historyCount;
+  }
+  if (historyCount >= MAX_PULSES_PER_WINDOW) return false;
   // Budget applies to manual tests too; ARM / STOP never reset this budget.
-  ++pulsesInWindow; outputsOff(); activeChannel = channel;
+  pulseHistory[(historyHead+historyCount)%MAX_PULSES_PER_WINDOW] = now;
+  ++historyCount; outputsOff(); activeChannel = channel;
   pulseStarted = now; manualPulse = manual; writeRelay(channel, true); return true;
 }
+// ============================================================================
+// 08 / FILTERING, MOTION ESTIMATION AND OPTIONAL FEEDBACK
+// Every calibrated sample updates the motion display and tilt guard. The default
+// build returns before automatic actuation. Filtered velocity is only an estimate.
+// ============================================================================
 void controlSample(const Sample &s, float dt, uint32_t now) {
   // Remove a slowly varying gravity/bias baseline (time constant 0.75 s).
   // This is a motion detector, NOT full inertial navigation. Tilt contamination
@@ -199,49 +285,82 @@ void controlSample(const Sample &s, float dt, uint32_t now) {
   if (fabs(tiltX)>MAX_TILT_DEG || fabs(tiltY)>MAX_TILT_DEG) {
     fault(F("Tilt limit exceeded; inspect mounting/mechanism")); return;
   }
-  bool quiet = fabs(dynamicA)<ACCEL_QUIET && fabs(velocityEstimate)<VELOCITY_RELEASE;
+  // Offset actuators can inject yaw. Stop commands immediately above the limit;
+  // latch a fault only if it persists. This cannot actively cancel yaw torque.
+  float yawRate=fabs(s.w[2]-gyroBias[2]);
+  if (yawRate>MAX_YAW_RATE_DPS) {
+    outputsOff();
+    if (!yawExceeded) { yawExceeded=true; yawExceededSince=now; }
+    if (now-yawExceededSince>=YAW_FAULT_DWELL_MS) {
+      fault(F("Sustained yaw: inspect offset actuator forces")); return;
+    }
+  } else yawExceeded=false;
+  float maxRate=fmaxf(yawRate,fmaxf(fabs(s.w[0]-gyroBias[0]),fabs(s.w[1]-gyroBias[1])));
+  bool quiet = fabs(dynamicA)<accelQuietThreshold &&
+               fabs(velocityEstimate)<VELOCITY_RELEASE && maxRate<gyroQuietThreshold;
   if (quiet) {
     if (!quietTracking) { quietTracking = true; quietStarted = now; }
     if (now-quietStarted >= QUIET_MS) {
-      episode = false; waitingForQuiet = false; velocityEstimate = 0;
+      episode = false; waitingForQuiet = false; velocityEstimate = 0; directionGate.reset();
       if (!manualPulse) outputsOff();
     }
   } else quietTracking = false;
-  if (!armed) return;
+  if (!ENABLE_EXPERIMENTAL_CONTROL || !armed || yawExceeded) return;
   if (episode && now-episodeStarted >= EPISODE_MAX_MS) {
     outputsOff(); episode = false; waitingForQuiet = true;
   }
-  if (!episode && !waitingForQuiet && fabs(dynamicA)>ACCEL_START) {
+  if (!episode && !waitingForQuiet && fabs(dynamicA)>accelStartThreshold) {
     episode = true; episodeStarted = now;
   }
-  // Release as soon as the estimated force would assist the movement. Mechanical
-  // relay opening and flyback current decay still take time in the real hardware.
-  if (activeChannel >= 0 && !manualPulse
-      && CHANNEL_FORCE_SIGN[activeChannel]*velocityEstimate >= -VELOCITY_RELEASE) outputsOff();
-  if (!episode || waitingForQuiet || fabs(dynamicA)<ACCEL_QUIET
-      || fabs(velocityEstimate)<VELOCITY_START) return;
-  int8_t wantedForce = velocityEstimate > 0 ? -1 : 1;
-  for (uint8_t i=0; i<2; ++i) if (CHANNEL_FORCE_SIGN[i]==wantedForce) {
-    startPulse(i, false, now); break;
+  // Ask for OFF before estimated reversal, allowing assumed force-release delay.
+  const float offHorizon=(FORCE_RELEASE_MS+TIMING_MARGIN_MS)*0.001f;
+  if (activeChannel>=0 && !manualPulse &&
+      !Sedar::opposingThroughHorizon(CHANNEL_FORCE_SIGN[activeChannel],
+                                    velocityEstimate,dynamicA,offHorizon,VELOCITY_RELEASE))
+    outputsOff();
+  // Observe direction even when acceleration falls below the actuation gate.
+  int8_t direction=directionGate.observe(now,velocityEstimate,VELOCITY_START,DIRECTION_CONFIRM_MS);
+  if (!episode || waitingForQuiet || !direction || fabs(dynamicA)<accelQuietThreshold) return;
+  int8_t wantedForce=-direction;
+  const float fullHorizon=(ACTUATION_DELAY_MS+PULSE_MS+FORCE_RELEASE_MS+TIMING_MARGIN_MS)*0.001f;
+  // Skip if constant-acceleration prediction approaches reversal over the entire
+  // assumed response window. This is a rejection heuristic, NOT an energy proof.
+  if (!Sedar::opposingThroughHorizon(wantedForce,velocityEstimate,dynamicA,
+                                    fullHorizon,VELOCITY_RELEASE)) return;
+  for (uint8_t i=0;i<2;++i) if (CHANNEL_FORCE_SIGN[i]==wantedForce) {
+    if (startPulse(i,false,now)) directionGate.fired(direction);
+    break;
   }
 }
+// ============================================================================
+// 09 / SERIAL MONITOR COMMANDS
+// Type one command and press Enter with Newline selected, at 115200 baud.
+// Dispatch stops any current pulse first; HELP, STOP and calibration disarm.
+// ============================================================================
 void printStatus() {
   Serial.print(F("sensor=")); Serial.print(sensorReady);
+  Serial.print(F(" calibrating=")); Serial.print(calibrating);
   Serial.print(F(" calibrated=")); Serial.print(calibrated);
   Serial.print(F(" fault=")); Serial.print(faulted);
   Serial.print(F(" armed=")); Serial.print(armed);
   Serial.print(F(" axis=")); Serial.print(MOTION_AXIS==0?'X':'Y');
   Serial.print(F(" activeLOW=")); Serial.println(RELAY_ACTIVE_LOW);
+  Serial.print(F("experimentalControl=")); Serial.println(ENABLE_EXPERIMENTAL_CONTROL);
+  Serial.print(F("noiseSigma_m_s2=")); Serial.print(measuredAccelSigma,3);
+  Serial.print(F(" start=")); Serial.print(accelStartThreshold,3);
+  Serial.print(F(" quiet=")); Serial.println(accelQuietThreshold,3);
 }
 void executeCommand() {
   // Human console commands stop outputs first, so long text cannot prolong pulses.
   outputsOff();
   if (!strcmp(commandBuffer,"STOP")) { disarm(); Serial.println(F("STOP: disarmed; both outputs OFF.")); }
-  else if (!strcmp(commandBuffer,"CAL")) beginCalibration();
+  else if (!strcmp(commandBuffer,"CAL") || !strcmp(commandBuffer,"CALIBRATE")) beginCalibration();
   else if (!strcmp(commandBuffer,"ARM")) {
-    if (faulted || !calibrated || !sensorReady || !quietTracking
+    if (!ENABLE_EXPERIMENTAL_CONTROL) {
+      disarm(); Serial.println(F("ARM locked: experimental feedback not validated. See REALITY_CHECK.md."));
+    } else if (faulted || !calibrated || !sensorReady || !quietTracking
         || millis()-quietStarted<QUIET_MS) Serial.println(F("ARM refused: calibrate and keep still first."));
-    else { armed=true; episode=false; waitingForQuiet=false; velocityEstimate=0;
+    else { armed=true; episode=false; waitingForQuiet=false; velocityEstimate=0; directionGate.reset();
       Serial.println(F("ARMED: brief pulses enabled. STOP disables.")); }
   } else if (!strcmp(commandBuffer,"TEST1") || !strcmp(commandBuffer,"TEST2")) {
     if (armed) Serial.println(F("Send STOP before individual tests."));
@@ -252,9 +371,9 @@ void executeCommand() {
   else if (!strcmp(commandBuffer,"STATUS")) printStatus();
   else if (!strcmp(commandBuffer,"HELP")) {
     disarm();
-    Serial.println(F("CAL: stationary calibration. TEST1/TEST2: one short pulse."));
+    Serial.println(F("CALIBRATE (or CAL): flat/still calibration. TEST1/TEST2: short test."));
     Serial.println(F("Check relay polarity, rod contact & force direction FIRST."));
-    Serial.println(F("ARM: enable from quiet. STOP: disable. STATUS: diagnostics."));
+    Serial.println(F("ARM: locked in default build. STOP: disable. STATUS: diagnostics."));
     Serial.println(F("STREAM ON/OFF: 10 Hz CSV acceleration/estimated velocity."));
     Serial.println(F("HELP also disarms. Serial Monitor 115200, Newline."));
   } else Serial.println(F("Unknown command. Send HELP."));
@@ -273,6 +392,11 @@ void serviceSerial() {
     }
   }
 }
+// ============================================================================
+// 10 / STARTUP: RUNS ONCE AFTER POWER-UP OR RESET
+// Set relay pins OFF before making them outputs, initialize serial/I2C, then
+// start automatic stationary calibration. Opening Serial Monitor may reset Nano.
+// ============================================================================
 void setup() {
   for (uint8_t i=0; i<2; ++i) {
     // Set inactive latch BEFORE enabling output to avoid a firmware startup glitch.
@@ -282,22 +406,43 @@ void setup() {
   pinMode(LED_BUILTIN, OUTPUT); Serial.begin(115200);
   Wire.begin(); Wire.setClock(100000UL);
   Wire.setWireTimeout(3000UL, true); // AVR Boards 1.8.6: bounded I2C fault handling.
-  Serial.println(F("SEDAR Nano v1.0 -- boots disarmed. HELP for commissioning."));
+  Serial.println(F("SEDAR Nano v1.3 -- monitor/test default. HELP for commissioning."));
   beginCalibration();
 }
+// ============================================================================
+// 11 / MAIN LOOP: REPEATS WHILE POWERED
+// A: expire pulses and read commands. B: obtain fresh sensor samples and check
+// faults. C: calibrate or estimate motion. D: emit optional CSV and update the LED.
+// ============================================================================
 void loop() {
+  // Step A: enforce requested pulse duration before other work.
   uint32_t now=millis(); servicePulse(now); serviceSerial(); servicePulse(millis());
+  // Step B: sample at about 100 Hz; elapsed time uses rollover-safe subtraction.
   uint32_t us=micros();
   if (sensorReady && !faulted && (int32_t)(us-nextSample)>=0) {
     nextSample=us+SAMPLE_US; // Do not replay stale samples after a delay.
     uint32_t elapsed=us-lastSample;
     if (elapsed>50000UL) { fault(F("Sampling stalled for over 50 ms")); return; }
+    // A reset MPU can still ACK while using wrong ranges or sleeping. Detect it.
+    if (millis()-lastConfigCheck >= 250) {
+      lastConfigCheck = millis(); uint8_t cfg[4], power;
+      if (!readRegisters(0x19,4,cfg) || !readRegisters(0x6B,1,&power)
+          || cfg[0]!=9 || cfg[1]!=3 || cfg[2]!=8 || cfg[3]!=8 || power!=1) {
+        fault(F("Sensor configuration changed or read failed")); return;
+      }
+    }
+    // Do not integrate a repeated output register as a fresh measurement.
+    uint8_t ready;
+    if (!readRegisters(0x3A,1,&ready)) { fault(F("Sensor status read failed")); return; }
+    if (!(ready & 0x01)) { servicePulse(millis()); return; }
     Sample sample;
     if (!readSample(sample)) { fault(F("Sensor read failure or measurement saturation")); return; }
     lastSample=us;
+    // Step C: a sample belongs either to calibration or to normal monitoring.
     if (calibrating) calibrateSample(sample);
     else if (calibrated) controlSample(sample, elapsed*0.000001f, millis());
   }
+  // Step D: optional human-readable telemetry and the status LED.
   // Short integer-only CSV fits TX buffer; never block a relay pulse for telemetry.
   if (streaming && calibrated && millis()-lastReport>=100 && Serial.availableForWrite()>=48) {
     lastReport=millis();

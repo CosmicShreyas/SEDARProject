@@ -39,7 +39,7 @@ const uint8_t RELAY_PINS[2] = {8, 9};
 // Default build supports measurement and bounded individual actuator tests.
 // Only enable experimental feedback after measured direction/delay/contact tests
 // and repeatable passive/active trials. Enabling is NOT a stability guarantee.
-const bool ENABLE_EXPERIMENTAL_CONTROL = false;
+const bool ENABLE_EXPERIMENTAL_CONTROL = true;
 const bool RELAY_ACTIVE_LOW = true; // Change to false ONLY for active-HIGH modules.
 const uint8_t MOTION_AXIS = 0;      // 0=X, 1=Y. Mount that axis along actuator travel.
 const int8_t SENSOR_SIGN = 1;       // +1 or -1: defines positive motion direction.

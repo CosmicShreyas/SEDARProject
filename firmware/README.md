@@ -42,6 +42,22 @@ Disconnect power before changing wires. Keep the **12 V relay-contact/coil branc
 | Sensor GND | Common logic ground |
 | Sensor VCC | Supply specified for the exact breakout; a bare MPU6050 is not a 5 V device. Verify I2C logic compatibility; use level shifting if required. |
 | Sensor AD0 | GND when appropriate, address 0x68; sketch also probes 0x69 |
+| Sensor WHO_AM_I | Not a gate. Clone modules sold as MPU6050 report 0x70/0x72/0x73/0x98 instead of 0x68 and work normally; `STATUS` prints `i2cAddr` and `whoAmI` for diagnosis. |
+
+### If the sensor faults at startup
+
+The fault now names the stage that failed, and `I2CSCAN` lists what is really on the bus.
+
+| Symptom | Meaning |
+| --- | --- |
+| `I2CSCAN` reports `total=0`, `probe 0x68 returned 2` | Bus is electrically healthy but nothing is at that address. Wiring or power to the module: check VCC, that GND is **common with the Nano**, and that SDA/SCL are not swapped. |
+| `I2CSCAN` reports `total=0`, `probe 0x68 returned 5` | SDA or SCL is stuck low: a short, a miswire, or a missing pull-up. The `SDA(A4)=`/`SCL(A5)=` line says which; both must read 1 when idle. |
+| `SDA(A4)=0` or `SCL(A5)=0` | That line is held low. Most often SDA/SCL swapped, a solder bridge, or the module unpowered while still connected. |
+| `I2CSCAN` lists 0x68 or 0x69, but init still fails | The bus is fine; read the reported stage. A stuck reset or "still asleep" points at a marginal supply or a clone needing longer settling. |
+| `I2CSCAN` lists an address that is neither 0x68 nor 0x69 | Wrong sensor module, or AD0 floating at an odd level. |
+| Stage says `config read back wrong values` | The part ACKs but will not hold configuration — typically an unstable 3.3 V rail or long/unshielded I2C leads. |
+
+Long jumper leads and breadboards are the usual cause of intermittent ACK failures. Keep SDA/SCL short; the Nano's internal pull-ups are weak and most breakouts already carry their own.
 | Sensor INT | Unused; polling needs no interrupt connection |
 | Nano D8 / D9 | Relay IN1 / IN2 |
 | Buck OUT+, adjusted to 5.0 V first | Nano 5V and relay logic VCC, not Nano VIN |

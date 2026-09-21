@@ -59,6 +59,13 @@ const uint16_t YAW_FAULT_DWELL_MS = 100;
 const uint16_t COOLDOWN_MS = 220;   // Both channels remain off between pulses.
 const uint16_t WINDOW_MS = 5000;
 const uint8_t MAX_PULSES_PER_WINDOW = 6; // <=240 ms commanded ON in a 5 s window.
+// Thermal budget. The 5 s burst window above does NOT bound average heating:
+// six pulses every 5 s, sustained, is ~5% duty indefinitely, which can still cook
+// a small solenoid over minutes. These limit accumulated ON-time per channel over
+// a long rolling window. Starting values are ASSUMPTIONS, not measured ratings of
+// your solenoids: if a coil still becomes hot to touch, lower THERMAL_BUDGET_MS.
+const uint32_t THERMAL_WINDOW_MS = 60000; // Rolling one-minute observation window.
+const uint16_t THERMAL_BUDGET_MS = 1500;  // Max commanded ON per channel per window.
 const uint16_t EPISODE_MAX_MS = 8000;   // Then wait for sustained quiet.
 const uint16_t QUIET_MS = 700;
 const float ACCEL_START = 0.40f;    // m/s^2, filtered dynamic acceleration.
@@ -85,6 +92,8 @@ static_assert(MAX_PULSES_PER_WINDOW > 0, "Pulse budget must be positive");
 // ============================================================================
 struct Sample { float a[3]; float w[3]; }; // acceleration m/s^2; angular rate deg/s.
 uint8_t mpuAddress = 0;
+uint8_t whoAmI = 0; // Last WHO_AM_I value read; informational, never a gate.
+const __FlashStringHelper *initStage = nullptr; // Where initSensor() last got to.
 bool sensorReady = false, calibrated = false, calibrating = false;
 bool faulted = false, armed = false, streaming = false;
 bool episode = false, waitingForQuiet = false, quietTracking = false;
@@ -93,6 +102,10 @@ bool manualPulse = false;
 uint32_t pulseStarted = 0, lastOff = 0;
 uint32_t pulseHistory[MAX_PULSES_PER_WINDOW] = {};
 uint8_t historyHead = 0, historyCount = 0;
+// Accumulated commanded ON-time per channel, decayed continuously so the budget
+// refills linearly over THERMAL_WINDOW_MS rather than resetting at a boundary.
+uint32_t thermalOnMs[2] = {0, 0};
+uint32_t thermalLastDecay = 0;
 uint32_t episodeStarted = 0, quietStarted = 0, nextSample = 0, lastSample = 0;
 uint32_t lastReport = 0;
 uint32_t lastConfigCheck = 0;
@@ -115,12 +128,24 @@ bool commandOverflow = false;
 // All relay writes go through these helpers. OFF is translated to the module polarity.
 // disarm() prevents automatic pulses; fault() also requires successful recalibration.
 // ============================================================================
+// PUSH-PULL drive: the pin actively drives both levels. Measured on this
+// hardware, releasing a relay pin leaves it floating LOW (no external pull-up),
+// so high-impedance would hold an active-LOW board permanently energised.
+// RELAY_ACTIVE_LOW selects the polarity; verify it with firmware/RelayTest.
 void writeRelay(uint8_t channel, bool on) {
   digitalWrite(RELAY_PINS[channel], (on == RELAY_ACTIVE_LOW) ? LOW : HIGH);
 }
 void outputsOff() {
   writeRelay(0, false); writeRelay(1, false);
-  if (activeChannel >= 0) lastOff = millis();
+  if (activeChannel >= 0) {
+    uint32_t now = millis();
+    // Charge the thermal budget with ACTUAL elapsed on-time, not the nominal
+    // PULSE_MS, so a pulse extended by slow processing is still accounted for.
+    uint32_t onMs = now - pulseStarted;
+    if (onMs > HARD_MAX_ON_MS) onMs = HARD_MAX_ON_MS; // Ignore rollover artefacts.
+    thermalOnMs[activeChannel] += onMs;
+    lastOff = now;
+  }
   activeChannel = -1; manualPulse = false;
 }
 void disarm() {
@@ -157,23 +182,70 @@ bool readRegisters(uint8_t reg, uint8_t count, uint8_t *out) {
   return !Wire.getWireTimeoutFlag();
 }
 bool initSensor() {
-  // Configure while disarmed. WHO_AM_I returns 0x68 even with AD0 high (0x69).
+  // Configure while disarmed. Probe both addresses: AD0 low is 0x68, AD0 high 0x69.
+  // Selection is by ACK, not by WHO_AM_I. Genuine InvenSense parts report 0x68, but
+  // the clones sold as "MPU6050" commonly report 0x70, 0x72, 0x73 or 0x98 while
+  // exposing the identical register map. Requiring 0x68 rejects correctly wired
+  // hardware; the configuration read-back below is what actually proves the part works.
+  // initStage records how far we got so a fault names the exact failing step
+  // instead of collapsing eight distinct causes into one message.
   uint8_t id = 0;
-  for (uint8_t n = 0; n < 2; ++n) {
-    mpuAddress = 0x68 + n;
-    if (readRegisters(0x75, 1, &id) && id == 0x68) break;
-    if (n == 1) return false;
+  bool found = false;
+  initStage = F("probe: no ACK at 0x68 or 0x69");
+  // Probe with a bare address write, not a register read: a plain ACK is the
+  // existence test, and it avoids the repeated START that some clones mishandle.
+  // Retry for ~1 s because the part needs time after power-up before it answers,
+  // and setup() reaches here only milliseconds after Wire.begin().
+  for (uint8_t attempt = 0; attempt < 10 && !found; ++attempt) {
+    for (uint8_t n = 0; n < 2 && !found; ++n) {
+      uint8_t addr = 0x68 + n;
+      Wire.beginTransmission(addr);
+      if (Wire.endTransmission() == 0) { mpuAddress = addr; found = true; }
+    }
+    if (!found) delay(100); // Disarmed; blocking here is safe.
   }
+  if (!found) return false;
+  // Identity is informational only; a failed read must not veto a part that ACKed.
+  if (!readRegisters(0x75, 1, &id)) id = 0;
+  whoAmI = id; // Reported by WHOAMI/STATUS so an odd clone ID stays visible.
+
+  // Reset first: PWR_MGMT_1 powers up as 0x40 (sleep), and a module that was
+  // left half-configured by a previous sketch otherwise keeps those settings.
+  initStage = F("write 0x6B device reset");
+  if (!writeRegister(0x6B, 0x80)) return false;
+  delay(100);                    // Datasheet reset time; disarmed, so blocking is safe.
+  // DEVICE_RESET self-clears when the reset completes. Clones can be slow, so poll
+  // rather than assuming a fixed delay was enough.
+  initStage = F("device reset never completed (0x6B bit7 stuck)");
+  bool cleared = false;
+  for (uint8_t tries = 0; tries < 20 && !cleared; ++tries) {
+    uint8_t power = 0;
+    if (readRegisters(0x6B, 1, &power) && !(power & 0x80)) cleared = true;
+    else delay(10);
+  }
+  if (!cleared) return false;
+
+  initStage = F("write 0x6B wake/PLL");
   if (!writeRegister(0x6B, 0x01)) return false; // Wake, PLL clock.
   delay(100);                               // Only during disarmed initialization.
+  // Reset leaves SLEEP set; confirm the part actually woke before trusting it.
+  initStage = F("sensor still asleep after wake (0x6B)");
+  uint8_t power = 0;
+  if (!readRegisters(0x6B, 1, &power) || (power & 0x40)) return false;
+
+  initStage = F("write config registers 0x6C/0x1A/0x19/0x1B/0x1C");
   if (!writeRegister(0x6C, 0x00) ||           // All axes awake.
       !writeRegister(0x1A, 0x03) ||           // DLPF: gyro ~42 Hz, accel ~44 Hz.
       !writeRegister(0x19, 0x09) ||           // 1 kHz / (1+9) = 100 Hz.
       !writeRegister(0x1B, 0x08) ||           // Gyro +/-500 deg/s: 65.5 LSB/(deg/s).
       !writeRegister(0x1C, 0x08)) return false; // Accel +/-4 g: 8192 LSB/g.
+  initStage = F("read back config 0x19..0x1C");
   uint8_t settings[4];
   if (!readRegisters(0x19, 4, settings)) return false;
-  return settings[0] == 9 && settings[1] == 3 && settings[2] == 8 && settings[3] == 8;
+  initStage = F("config read back wrong values");
+  if (!(settings[0] == 9 && settings[1] == 3 && settings[2] == 8 && settings[3] == 8)) return false;
+  initStage = F("ok");
+  return true;
 }
 int16_t signedWord(const uint8_t *b) {
   return (int16_t)(((uint16_t)b[0] << 8) | b[1]);
@@ -197,7 +269,14 @@ bool readSample(Sample &s) {
 void beginCalibration() {
   disarm(); faulted = false; calibrated = false; calibrating = false;
   sensorReady = initSensor();
-  if (!sensorReady) { fault(F("MPU6050 not found/configured; check power/SDA/SCL")); return; }
+  if (!sensorReady) {
+    Serial.print(F("MPU6050 init failed at stage: ")); Serial.println(initStage);
+    Serial.print(F("  i2cAddr=0x")); Serial.print(mpuAddress,16);
+    Serial.print(F(" whoAmI=0x")); Serial.println(whoAmI,16);
+    Serial.println(F("  Run I2CSCAN to list devices actually answering on the bus."));
+    fault(F("MPU6050 did not ACK or configure at 0x68/0x69; check VCC/GND, SDA=A4, SCL=A5"));
+    return;
+  }
   memset(meanA, 0, sizeof(meanA)); memset(m2A, 0, sizeof(m2A));
   memset(meanW, 0, sizeof(meanW)); memset(m2W, 0, sizeof(m2W));
   yawExceeded = false; gyroQuietThreshold = 2.0f;
@@ -247,8 +326,28 @@ void calibrateSample(const Sample &s) {
 // TEST1/TEST2 and optional feedback share this gate: one channel, cooldown and
 // a rolling pulse budget. This controls commands, not actual measured coil force.
 // ============================================================================
+// Bleed off accumulated on-time at THERMAL_BUDGET_MS per THERMAL_WINDOW_MS, which
+// models cooling as a linear refill. Called from the main loop so the budget
+// recovers whether or not pulses are being requested.
+void serviceThermal(uint32_t now) {
+  uint32_t elapsed = now - thermalLastDecay;
+  if (elapsed < 100) return;             // Coarse steps keep the integer maths exact.
+  uint32_t bleed = (elapsed * THERMAL_BUDGET_MS) / THERMAL_WINDOW_MS;
+  if (!bleed) return;                    // Wait for a whole millisecond of credit.
+  // Advance the clock only by the time this bleed actually represents, so the
+  // truncated remainder carries into the next call. Consuming the whole elapsed
+  // interval would discard that fraction and refill slower than configured.
+  thermalLastDecay += (bleed * THERMAL_WINDOW_MS) / THERMAL_BUDGET_MS;
+  for (uint8_t i = 0; i < 2; ++i) {
+    thermalOnMs[i] = (thermalOnMs[i] > bleed) ? thermalOnMs[i] - bleed : 0;
+  }
+}
 bool startPulse(uint8_t channel, bool manual, uint32_t now) {
   if (channel > 1 || activeChannel >= 0 || faulted || !sensorReady || !calibrated) return false;
+  // Thermal budget: refuse if this pulse would exceed the channel's ON-time
+  // allowance for the rolling window. Applies to manual TEST commands too, since
+  // the coil heats identically whether a human or the controller asked for it.
+  if (thermalOnMs[channel] + PULSE_MS > THERMAL_BUDGET_MS) return false;
   if (!manual && (!ENABLE_EXPERIMENTAL_CONTROL || !armed)) return false;
   if (now-lastOff < COOLDOWN_MS) return false;
   // Rolling start-time budget: no fixed-window boundary burst. Unsigned elapsed
@@ -345,10 +444,17 @@ void printStatus() {
   Serial.print(F(" armed=")); Serial.print(armed);
   Serial.print(F(" axis=")); Serial.print(MOTION_AXIS==0?'X':'Y');
   Serial.print(F(" activeLOW=")); Serial.println(RELAY_ACTIVE_LOW);
+  // A non-0x68 whoAmI is a clone, which is normal and not a fault.
+  Serial.print(F("i2cAddr=0x")); Serial.print(mpuAddress,16);
+  Serial.print(F(" whoAmI=0x")); Serial.println(whoAmI,16);
   Serial.print(F("experimentalControl=")); Serial.println(ENABLE_EXPERIMENTAL_CONTROL);
   Serial.print(F("noiseSigma_m_s2=")); Serial.print(measuredAccelSigma,3);
   Serial.print(F(" start=")); Serial.print(accelStartThreshold,3);
   Serial.print(F(" quiet=")); Serial.println(accelQuietThreshold,3);
+  // Remaining coil ON-time allowance per channel before pulses are refused.
+  Serial.print(F("thermalUsedMs ch1=")); Serial.print(thermalOnMs[0]);
+  Serial.print(F(" ch2=")); Serial.print(thermalOnMs[1]);
+  Serial.print(F(" budget=")); Serial.println(THERMAL_BUDGET_MS);
 }
 void executeCommand() {
   // Human console commands stop outputs first, so long text cannot prolong pulses.
@@ -369,12 +475,38 @@ void executeCommand() {
   } else if (!strcmp(commandBuffer,"STREAM ON")) { streaming=true; Serial.println(F("a_mm_s2,v_mm_s,ch,armed")); }
   else if (!strcmp(commandBuffer,"STREAM OFF")) streaming=false;
   else if (!strcmp(commandBuffer,"STATUS")) printStatus();
+  else if (!strcmp(commandBuffer,"I2CSCAN")) {
+    // Bus-level truth, independent of any MPU6050 logic: which addresses ACK at all.
+    disarm();
+    Serial.println(F("I2CSCAN: probing 0x08..0x77"));
+    uint8_t seen = 0;
+    for (uint8_t addr = 0x08; addr < 0x78; ++addr) {
+      Wire.beginTransmission(addr);
+      if (Wire.endTransmission() == 0) {
+        ++seen; Serial.print(F("  device at 0x")); Serial.println(addr,16);
+      }
+    }
+    if (!seen) {
+      // Distinguish "bus idle, nobody home" from "bus electrically stuck".
+      Serial.println(F("  none answering."));
+      Wire.beginTransmission(0x68);
+      uint8_t code = Wire.endTransmission();
+      Serial.print(F("  probe 0x68 returned ")); Serial.println(code);
+      Serial.println(F("  2=address NACK: powered bus, no device (wiring/address)"));
+      Serial.println(F("  5=timeout: SDA/SCL stuck low -- wiring, short, or no pull-ups"));
+      Serial.print(F("  SDA(A4)=")); Serial.print(digitalRead(A4));
+      Serial.print(F(" SCL(A5)=")); Serial.println(digitalRead(A5));
+      Serial.println(F("  Both should read 1 when idle. A 0 means that line is held low."));
+    }
+    Serial.print(F("  total=")); Serial.println(seen);
+  }
   else if (!strcmp(commandBuffer,"HELP")) {
     disarm();
     Serial.println(F("CALIBRATE (or CAL): flat/still calibration. TEST1/TEST2: short test."));
     Serial.println(F("Check relay polarity, rod contact & force direction FIRST."));
     Serial.println(F("ARM: locked in default build. STOP: disable. STATUS: diagnostics."));
     Serial.println(F("STREAM ON/OFF: 10 Hz CSV acceleration/estimated velocity."));
+    Serial.println(F("I2CSCAN: list I2C devices answering; use when the sensor faults."));
     Serial.println(F("HELP also disarms. Serial Monitor 115200, Newline."));
   } else Serial.println(F("Unknown command. Send HELP."));
 }
@@ -416,7 +548,7 @@ void setup() {
 // ============================================================================
 void loop() {
   // Step A: enforce requested pulse duration before other work.
-  uint32_t now=millis(); servicePulse(now); serviceSerial(); servicePulse(millis());
+  uint32_t now=millis(); servicePulse(now); serviceThermal(now); serviceSerial(); servicePulse(millis());
   // Step B: sample at about 100 Hz; elapsed time uses rollover-safe subtraction.
   uint32_t us=micros();
   if (sensorReady && !faulted && (int32_t)(us-nextSample)>=0) {

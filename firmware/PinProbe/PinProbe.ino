@@ -29,7 +29,7 @@ int readWhileSinking(uint8_t pin) {
 }
 
 int readWhileReleased(uint8_t pin) {
-  pinMode(pin, INPUT);   // No internal pull-up: report only what is external.
+  pinMode(pin, INPUT); // No internal pull-up: report only what is external.
   delay(5);
   return digitalRead(pin);
 }
@@ -40,7 +40,8 @@ void setup() {
     digitalWrite(PINS[i], LOW);
   }
   Serial.begin(115200);
-  while (!Serial && millis() < 2000) {}
+  while (!Serial && millis() < 2000) {
+  }
   Serial.println(F("PinProbe -- open-drain line check on D8/D9"));
   Serial.println(F("released=1 means something external holds the line HIGH (good:"));
   Serial.println(F("  that is the relay board pull-up). released=0 with the relay"));
@@ -54,15 +55,21 @@ void loop() {
   for (uint8_t i = 0; i < 2; ++i) {
     uint8_t pin = PINS[i];
     int released = readWhileReleased(pin);
-    int sinking  = readWhileSinking(pin);
-    pinMode(pin, INPUT);   // Leave released so the relay ends up OFF.
+    int sinking = readWhileSinking(pin);
+    pinMode(pin, INPUT); // Leave released so the relay ends up OFF.
 
-    Serial.print(F("D")); Serial.print(pin);
-    Serial.print(F("  released=")); Serial.print(released);
-    Serial.print(F("  sinking="));  Serial.print(sinking);
-    if (released == 0) Serial.print(F("   <- no pull-up seen on this line"));
-    else if (sinking == 1) Serial.print(F("   <- CANNOT pull low"));
-    else Serial.print(F("   <- line behaves correctly"));
+    Serial.print(F("D"));
+    Serial.print(pin);
+    Serial.print(F("  released="));
+    Serial.print(released);
+    Serial.print(F("  sinking="));
+    Serial.print(sinking);
+    if (released == 0)
+      Serial.print(F("   <- no pull-up seen on this line"));
+    else if (sinking == 1)
+      Serial.print(F("   <- CANNOT pull low"));
+    else
+      Serial.print(F("   <- line behaves correctly"));
     Serial.println();
   }
   Serial.println();

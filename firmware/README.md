@@ -74,7 +74,7 @@ Avoid simultaneous USB and external 5 V unless the particular Nano's power arran
 
 ## 3. Upload in Arduino IDE
 
-1. Extract `SEDAR-Arduino.zip`. Open `SEDAR_Nano/SEDAR_Nano.ino`, keeping the matching folder name.
+1. Extract the GitHub repository ZIP. Open `SEDARProject-main/firmware/SEDAR_Nano/SEDAR_Nano.ino`, keeping `PulsePolicy.h` beside it. If using the firmware-only ZIP, open `SEDAR_Nano/SEDAR_Nano.ino`.
 2. Install **Arduino AVR Boards 1.8.6 or later** through Boards Manager.
 3. Review the constants at the top. Set `RELAY_ACTIVE_LOW` to match the actual relay module before powering its logic.
 4. Connect the Nano using a USB data cable with the coil branch disconnected. Select **Arduino AVR Boards → Arduino Nano**, **Processor → ATmega328P**, and the correct port.
@@ -116,7 +116,7 @@ Only a measured bench-development process should consider changing `ENABLE_EXPER
 - In the optional experimental build only, selects a channel opposing estimated velocity. Only one channel can be active at a time. Pulses request 40 ms and can release earlier at reversal; loop processing and real relay/coil release add delay; both channels then wait at least 220 ms.
 - Allows at most six pulse starts per rolling five-second window. This is a software budget, not a measured thermal rating. Reduce settings when component ratings require it.
 - Ends an episode after eight seconds and requires sustained quiet before another. Quiet resets residual velocity estimates, preventing indefinite noise-driven pulses.
-- Checks data-ready and periodically rechecks sensor configuration. Latches outputs OFF for I2C failure, configuration changes, saturation, excessive estimated tilt or missing fresh samples over 50 ms. `CAL` reinitializes and recalibrates.
+- Checks data-ready and periodically rechecks sensor configuration. Latches outputs OFF for I2C failure, configuration changes or missing fresh samples over 50 ms. `CAL` reinitializes and recalibrates.
 - Uses a 3 ms Wire timeout and checks pulse expiry before serial/sensor work. The 60 ms guard is software, not protection against a crashed processor or welded relay. Keep the physical switch accessible.
 
 The built-in LED is OFF in monitor/calibration, steady ON when armed, and blinking on fault.
@@ -189,7 +189,7 @@ The sketch is divided into eleven labelled sections. Search for the number/name 
 | 05 / MPU6050 communication | Register configuration, data reading and conversion to physical units |
 | 06 / Flat, stationary calibration | Begin/reset calibration, collect 400 samples and validate the baseline |
 | 07 / Limited individual actuator pulses | One-channel rule, cooldown and rolling pulse budget |
-| 08 / Filtering and optional feedback | Dynamic acceleration, estimated velocity, tilt guard and experimental control |
+| 08 / Filtering and optional feedback | Selected-axis acceleration, estimated velocity and experimental control |
 | 09 / Serial Monitor commands | STATUS output, command dispatch and incoming-text parser |
 | 10 / Startup | Runs once: initialize OFF pins, serial, I2C and calibration |
 | 11 / Main loop | Repeats: check pulse expiry, process commands, sample/check sensor, calibrate or monitor, then print telemetry |
@@ -198,11 +198,11 @@ For normal use, send commands; no source edit or re-upload is needed. Editing co
 
 ## Relay behavior in revision 1.3
 
-Read [CONTROL_RESEARCH.md](CONTROL_RESEARCH.md) for the research, assumptions and tests. The experimental controller now waits for a consistent estimated direction, allows at most one pulse per confirmed half-cycle, skips pulses when a simple prediction approaches reversal, and requests OFF earlier to allow for release delay. Calibration sets noise-based acceleration thresholds above fixed minimums. Sustained yaw trips a fault; high yaw immediately stops commanded outputs.
+Read [CONTROL_RESEARCH.md](CONTROL_RESEARCH.md) for the research, assumptions and tests. The experimental controller now waits for a consistent estimated direction, allows at most one pulse per confirmed half-cycle, skips pulses when a simple prediction approaches reversal, and requests OFF earlier to allow for release delay. Calibration sets noise-based acceleration thresholds above fixed minimums. Live operation uses only the selected horizontal axis. Tilt, yaw, vertical/other-axis motion and measurement clipping do not fault, disarm or inhibit the controller.
 
 These changes may produce **fewer pulses**, which is intentional. TEST1/TEST2 remain individual hardware-characterization pulses and bypass the automatic direction/prediction selection. Do not repeatedly send TEST commands to simulate damping. The default automatic-control lock is unchanged.
 
-STATUS now also reports `noiseSigma_m_s2`, `start` and `quiet`: measured stationary acceleration noise and the effective acceleration thresholds in m/s². A yaw fault means inspect the force geometry and let the model stop before CALIBRATE. It cannot distinguish solenoid-induced yaw from externally imposed rotation.
+STATUS now also reports `noiseSigma_m_s2`, `start` and `quiet`: measured stationary acceleration noise and the effective acceleration thresholds in m/s². Sensor communication, configuration and stale-data faults still disable outputs. Calibration still requires a flat, stationary model before use.
 
 The sketch includes `PulsePolicy.h` beside the `.ino`. Keep both files together when opening/uploading the extracted folder. The header is part of the sketch, not an extra library to install.
 
@@ -218,15 +218,12 @@ The sketch includes `PulsePolicy.h` beside the `.ino`. Keep both files together 
 | COOLDOWN_MS | 220 ms | Shared off interval |
 | MAX_PULSES_PER_WINDOW | 6 per 5 s | Pulse budget |
 | EPISODE_MAX_MS | 8000 ms | Response limit until quiet |
-| MAX_TILT_DEG | 15° | Coarse tilt guard |
 | ACTUATION_DELAY_MS | 20 ms | Assumed delay to effective contact; must be measured |
 | FORCE_RELEASE_MS | 35 ms | Assumed complete force release; must be measured |
 | TIMING_MARGIN_MS | 10 ms | Additional prediction allowance |
 | DIRECTION_CONFIRM_MS | 30 ms | Continuous above-threshold direction confirmation |
-| MAX_YAW_RATE_DPS | 15°/s | Immediate OFF above this example angular-rate guard |
-| YAW_FAULT_DWELL_MS | 100 ms | Persistent yaw above the limit latches a fault |
 
-Use stationary logs to set thresholds above noise; change one parameter at a time. Mechanical relays may be too slow for shorter pulses. Do not exceed coil duty limits. A roof accelerometer cannot independently measure base motion, spring travel or contact force. Tilt contaminates acceleration; filtering and leaky integration introduce phase error. The complementary tilt guard is also affected by translation. Hardware measurements and repeated passive/active tests are essential; the geometry may require a different control arrangement.
+Use stationary logs to set thresholds above noise; change one parameter at a time. Mechanical relays may be too slow for shorter pulses. Do not exceed coil duty limits. A roof accelerometer cannot independently measure base motion, spring travel or contact force. Tilt contaminates acceleration; filtering and leaky integration introduce phase error. Tilt can still contaminate the selected accelerometer reading even though it no longer causes a motion fault. Hardware measurements and repeated passive/active tests are essential; the geometry may require a different control arrangement.
 
 ## 8. Troubleshooting
 
@@ -243,3 +240,7 @@ Use stationary logs to set thresholds above noise; change one parameter at a tim
 [Arduino Nano](https://docs.arduino.cc/hardware/nano/), [TDK MPU6050 register map](https://invensense.tdk.com/wp-content/uploads/2015/02/MPU-6000-Register-Map1.pdf), [Arduino AVR Wire](https://github.com/arduino/ArduinoCore-avr/tree/master/libraries/Wire).
 
 Compiled with `arduino-cli compile --fqbn arduino:avr:nano:cpu=atmega328 SEDAR_Nano`, AVR core 1.8.6. No physical device was flashed or stability-tested during preparation.
+
+## Horizontal-only live demonstration update
+
+After successful calibration, the code responds only to `MOTION_AXIS` (0 = X, default; 1 = Y if that axis physically points left/right). Align the chosen roof-sensor axis with the solenoid travel. Vertical motion and gyro rotation do not enter the live control decisions. Motion reaching sensor range limits can clip the data but no longer causes a fault. Calibration still checks all axes while the model is flat and stationary. Movement does not clear ARM; explicit STOP, calibration, and genuine sensor/bus faults retain their existing behavior. Existing pulse/cooldown/duty/episode limits and the compile-time ARM setting are unchanged.

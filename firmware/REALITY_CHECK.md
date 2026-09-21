@@ -60,3 +60,7 @@ Primary references: [TDK MPU6050 register map](https://invensense.tdk.com/wp-con
 ## Revision 1.3 follow-up
 
 See CONTROL_RESEARCH.md for noise thresholds, direction dwell, per-half-cycle pulse gating, assumed-delay reversal checks and the yaw shutoff. These reduce unwanted command opportunities but do not resolve the physical limitations above. The default automatic-feedback lock remains.
+
+## Current live-demo behavior
+
+Runtime tilt/yaw and measurement-range shutdowns have been removed at the owner's request. Only the selected horizontal motion estimate drives live control; other-axis movement does not disarm it. Flat/stationary calibration and genuine communication/configuration/stale-data fault handling remain. Earlier references to runtime tilt or saturation shutoff describe the previous revision. This change does not eliminate tilt contamination or mechanical yaw.

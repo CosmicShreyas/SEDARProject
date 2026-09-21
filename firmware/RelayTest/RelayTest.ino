@@ -37,7 +37,8 @@ void setRelay(uint8_t channel, bool on) {
 }
 
 void allOff() {
-  for (uint8_t i = 0; i < 2; ++i) setRelay(i, false);
+  for (uint8_t i = 0; i < 2; ++i)
+    setRelay(i, false);
 }
 
 void setup() {
@@ -49,10 +50,12 @@ void setup() {
   }
   pinMode(LED_BUILTIN, OUTPUT);
   Serial.begin(115200);
-  while (!Serial && millis() < 2000) { /* wait briefly for USB serial */ }
+  while (!Serial && millis() < 2000) { /* wait briefly for USB serial */
+  }
 
   Serial.println(F("RelayTest -- alternating relay check"));
-  Serial.print(F("activeLOW=")); Serial.println(RELAY_ACTIVE_LOW);
+  Serial.print(F("activeLOW="));
+  Serial.println(RELAY_ACTIVE_LOW);
   Serial.println(F("Listen for a CLICK on each relay, not just the LED."));
   Serial.println(F("LED without click = coil has no supply or not enough current."));
   Serial.println(F("Run with coil/solenoid power DISCONNECTED first."));
@@ -62,11 +65,13 @@ void setup() {
 
 void loop() {
   for (uint8_t ch = 0; ch < 2; ++ch) {
-    allOff();                 // Never energise both: one at a time, always.
+    allOff(); // Never energise both: one at a time, always.
     delay(GAP_MS);
 
-    Serial.print(F("Relay ")); Serial.print(ch + 1);
-    Serial.print(F(" (D")); Serial.print(RELAY_PINS[ch]);
+    Serial.print(F("Relay "));
+    Serial.print(ch + 1);
+    Serial.print(F(" (D"));
+    Serial.print(RELAY_PINS[ch]);
     Serial.println(F(") ON"));
     digitalWrite(LED_BUILTIN, HIGH);
     setRelay(ch, true);
@@ -74,7 +79,9 @@ void loop() {
 
     setRelay(ch, false);
     digitalWrite(LED_BUILTIN, LOW);
-    Serial.print(F("Relay ")); Serial.print(ch + 1); Serial.println(F(" OFF"));
+    Serial.print(F("Relay "));
+    Serial.print(ch + 1);
+    Serial.println(F(" OFF"));
     delay(GAP_MS);
   }
 }

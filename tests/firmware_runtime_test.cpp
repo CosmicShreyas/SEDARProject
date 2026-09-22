@@ -7,8 +7,9 @@ int main(){
  for(int &pin:fakePins)pin=HIGH;
  setup(); assert(calibrating && !armed && off());
  tick(4100); assert(calibrated && !calibrating && !faulted && off());
- assert(accelStartThreshold==ACCEL_START);
- command("ARM"); assert(!armed && off()); // default lock remains
+ assert(accelStartThreshold==ACCEL_START * sensitivityScale);
+ tick(800); command("ARM"); assert(armed==ENABLE_EXPERIMENTAL_CONTROL && off());
+ command("STOP"); // Individual tests require disarmed state.
  command("TEST1"); assert(activeChannel==0 && !armed);
  tick(40); assert(off() && activeChannel==-1);
  command("TEST2"); assert(off()); // cooldown refuses immediate switch

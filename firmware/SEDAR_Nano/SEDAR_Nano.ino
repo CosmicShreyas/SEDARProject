@@ -1,6 +1,6 @@
 /*
   SEDAR -- four-spring college demonstrator, classic Arduino Nano (ATmega328P)
-  Revision 1.3, selective relay pulse policy. Read ../README.md before coil power.
+  Revision 1.4, one-pulse settling policy. Read ../README.md before coil power.
 
   Hardware: roof MPU6050, two DRIVER-equipped relay module inputs, two
   mirrored spring-contact solenoids. Nano outputs NEVER drive coils directly.
@@ -9,7 +9,7 @@
   No third-party libraries: Wire is included in Arduino AVR Boards.
   Serial Monitor: 115200 baud, Newline. Boot -> calibrate -> MONITOR only.
   Commands: HELP STATUS CALIBRATE (or CAL) TEST1 TEST2 ARM STOP
-            STREAM ON / STREAM OFF
+            STREAM ON / STREAM OFF, SENS 1 / SENS 2 / SENS 3
 
   This is a conservative experimental controller, not a validated seismic
   protection system. It cannot know spring displacement or ground acceleration
@@ -36,9 +36,10 @@
 // -------------------- SETTINGS TO VERIFY ON YOUR HARDWARE --------------------
 const uint8_t RELAY_PINS[2] = {8, 9};
 // NO validated stabilizing law is possible from the supplied hardware details.
-// Default build supports measurement and bounded individual actuator tests.
+// Measurement and bounded individual actuator tests are always available.
 // Only enable experimental feedback after measured direction/delay/contact tests
 // and repeatable passive/active trials. Enabling is NOT a stability guarantee.
+// Preserve the enabled setting in the user's GitHub/live build. Boot is disarmed.
 const bool ENABLE_EXPERIMENTAL_CONTROL = true;
 const bool RELAY_ACTIVE_LOW = true; // Change to false ONLY for active-HIGH modules.
 const uint8_t MOTION_AXIS = 0;      // 0=X, 1=Y. Mount that axis along actuator travel.
@@ -104,6 +105,8 @@ bool manualPulse = false;
 uint32_t pulseStarted = 0, lastOff = 0;
 uint32_t pulseHistory[MAX_PULSES_PER_WINDOW] = {};
 uint8_t historyHead = 0, historyCount = 0;
+// Lifetime counts since reset: STATUS can report short pulses missed by 10 Hz CSV.
+uint32_t totalPulses[2] = {0, 0};
 // Accumulated commanded ON-time per channel, decayed continuously so the budget
 // refills linearly over THERMAL_WINDOW_MS rather than resetting at a boundary.
 uint32_t thermalOnMs[2] = {0, 0};
@@ -115,6 +118,10 @@ uint16_t calCount = 0;
 // Welford means / sum of squared deviations avoid subtracting two large g^2 values.
 float meanA[3] = {}, m2A[3] = {}, meanW[3] = {}, m2W[3] = {};
 float measuredAccelSigma = 0, accelStartThreshold = ACCEL_START;
+// Runtime sensitivity: 1=gentle, 2=normal, 3=sensitive. Reset restores sensitive.
+// Only detection thresholds change; pulse duration and relay limits stay fixed.
+uint8_t sensitivityLevel = 3;
+float sensitivityScale = 0.5f;
 float accelQuietThreshold = ACCEL_QUIET;
 Sedar::DirectionGate directionGate;
 float baselineA[3] = {}, gyroBias[3] = {}, gravity[3] = {};
@@ -375,8 +382,8 @@ void calibrateSample(const Sample &s) {
     return;
   }
   // Four-sigma start / two-sigma quiet with fixed minimums: no online gain learning.
-  accelStartThreshold = Sedar::startThreshold(measuredAccelSigma, ACCEL_START);
-  accelQuietThreshold = Sedar::quietThreshold(measuredAccelSigma, ACCEL_QUIET);
+  accelStartThreshold = Sedar::startThreshold(measuredAccelSigma, ACCEL_START * sensitivityScale);
+  accelQuietThreshold = Sedar::quietThreshold(measuredAccelSigma, ACCEL_QUIET * sensitivityScale);
   calibrating = false;
   calibrated = true;
   Serial.println(F("CAL OK. MONITOR: outputs disabled. HELP for next steps."));
@@ -427,6 +434,7 @@ bool startPulse(uint8_t channel, bool manual, uint32_t now) {
   // Budget applies to manual tests too; ARM / STOP never reset this budget.
   pulseHistory[(historyHead + historyCount) % MAX_PULSES_PER_WINDOW] = now;
   ++historyCount;
+  ++totalPulses[channel];
   outputsOff();
   activeChannel = channel;
   pulseStarted = now;
@@ -485,8 +493,8 @@ void controlSample(const Sample &s, float dt, uint32_t now) {
                                      offHorizon, VELOCITY_RELEASE))
     outputsOff();
   // Observe direction even when acceleration falls below the actuation gate.
-  int8_t direction =
-      directionGate.observe(now, velocityEstimate, VELOCITY_START, DIRECTION_CONFIRM_MS);
+  int8_t direction = directionGate.observe(now, velocityEstimate, VELOCITY_START * sensitivityScale,
+                                           DIRECTION_CONFIRM_MS);
   if (!episode || waitingForQuiet || !direction || fabs(dynamicA) < accelQuietThreshold)
     return;
   int8_t wantedForce = -direction;
@@ -499,8 +507,15 @@ void controlSample(const Sample &s, float dt, uint32_t now) {
     return;
   for (uint8_t i = 0; i < 2; ++i)
     if (CHANNEL_FORCE_SIGN[i] == wantedForce) {
-      if (startPulse(i, false, now))
+      if (startPulse(i, false, now)) {
         directionGate.fired(direction);
+        // An actuator kick can look like another earthquake to the roof sensor.
+        // Allow ONE automatic pulse, then require sustained quiet before another.
+        // Keep ARM set; pulse cutoff, communication faults and STOP still apply.
+        episode = false;
+        waitingForQuiet = true;
+        quietTracking = false;
+      }
       break;
     }
 }
@@ -534,6 +549,8 @@ void printStatus() {
   Serial.println(ENABLE_EXPERIMENTAL_CONTROL);
   Serial.print(F("noiseSigma_m_s2="));
   Serial.print(measuredAccelSigma, 3);
+  Serial.print(F(" sensitivityLevel="));
+  Serial.print(sensitivityLevel);
   Serial.print(F(" start="));
   Serial.print(accelStartThreshold, 3);
   Serial.print(F(" quiet="));
@@ -545,6 +562,12 @@ void printStatus() {
   Serial.print(thermalOnMs[1]);
   Serial.print(F(" budget="));
   Serial.println(THERMAL_BUDGET_MS);
+  Serial.print(F("pulsesSinceReset ch1="));
+  Serial.print(totalPulses[0]);
+  Serial.print(F(" ch2="));
+  Serial.print(totalPulses[1]);
+  Serial.print(F(" waitingForQuiet="));
+  Serial.println(waitingForQuiet);
 }
 void executeCommand() {
   // Human console commands stop outputs first, so long text cannot prolong pulses.
@@ -552,6 +575,28 @@ void executeCommand() {
   if (!strcmp(commandBuffer, "STOP")) {
     disarm();
     Serial.println(F("STOP: disarmed; both outputs OFF."));
+  } else if (!strcmp(commandBuffer, "SENS")) {
+    printStatus();
+  } else if (!strncmp(commandBuffer, "SENS ", 5)) {
+    // Require an exact single-digit level. Never silently accept malformed input.
+    if (armed)
+      Serial.println(F("Send STOP before changing sensitivity."));
+    else if (strlen(commandBuffer) != 6 || commandBuffer[5] < '1' || commandBuffer[5] > '3')
+      Serial.println(F("Use SENS 1 (gentle), SENS 2 (normal), SENS 3 (sensitive)."));
+    else {
+      sensitivityLevel = commandBuffer[5] - '0';
+      sensitivityScale = sensitivityLevel == 1 ? 2.0f : (sensitivityLevel == 2 ? 1.0f : 0.5f);
+      // Keep the measured noise floor even at the most sensitive level.
+      accelStartThreshold =
+          Sedar::startThreshold(measuredAccelSigma, ACCEL_START * sensitivityScale);
+      accelQuietThreshold =
+          Sedar::quietThreshold(measuredAccelSigma, ACCEL_QUIET * sensitivityScale);
+      velocityEstimate = 0;
+      directionGate.reset();
+      quietTracking = false;
+      Serial.println(F("Sensitivity updated; keep still before ARM. Reset restores level 3."));
+      printStatus();
+    }
   } else if (!strcmp(commandBuffer, "CAL") || !strcmp(commandBuffer, "CALIBRATE"))
     beginCalibration();
   else if (!strcmp(commandBuffer, "ARM")) {
@@ -617,8 +662,9 @@ void executeCommand() {
     disarm();
     Serial.println(F("CALIBRATE (or CAL): flat/still calibration. TEST1/TEST2: short test."));
     Serial.println(F("Check relay polarity, rod contact & force direction FIRST."));
-    Serial.println(F("ARM: locked in default build. STOP: disable. STATUS: diagnostics."));
+    Serial.println(F("ARM: enable feedback if build permits. STOP: disable. STATUS: diagnostics."));
     Serial.println(F("STREAM ON/OFF: 10 Hz CSV acceleration/estimated velocity."));
+    Serial.println(F("SENS 1/2/3: gentle/normal/sensitive (STOP first). SENS: show setting."));
     Serial.println(F("I2CSCAN: list I2C devices answering; use when the sensor faults."));
     Serial.println(F("HELP also disarms. Serial Monitor 115200, Newline."));
   } else
@@ -635,6 +681,18 @@ void serviceSerial() {
       } else if (commandLength) {
         commandBuffer[commandLength] = 0;
         executeCommand();
+        // Console text can exceed a sample interval at 115200 baud. Outputs were
+        // stopped before printing. Discard the unobserved interval rather than
+        // integrating it or misreporting our own printing delay as sensor loss.
+        // Hardware sampling/I2C timeouts outside console handling still apply.
+        velocityEstimate = 0;
+        directionGate.reset();
+        quietTracking = false;
+        lastSample = micros();
+        nextSample = lastSample + SAMPLE_US;
+        commandLength = 0;
+        commandOverflow = false;
+        return; // At most one complete command before servicing the sensor again.
       }
       commandLength = 0;
       commandOverflow = false;
@@ -662,7 +720,7 @@ void setup() {
   Wire.begin();
   Wire.setClock(100000UL);
   Wire.setWireTimeout(3000UL, true); // AVR Boards 1.8.6: bounded I2C fault handling.
-  Serial.println(F("SEDAR Nano v1.3 -- monitor/test default. HELP for commissioning."));
+  Serial.println(F("SEDAR Nano v1.4 -- starts disarmed; one-pulse settling. HELP for commands."));
   beginCalibration();
 }
 // ============================================================================

@@ -2,7 +2,7 @@
 
 This sketch targets the **classic 5 V Arduino Nano / ATmega328P**, a roof-mounted MPU6050 and a two-channel relay module with built-in drivers. It uses only `Wire`, included with Arduino AVR Boards 1.8.6. No separate MPU6050 library is needed.
 
-The sketch compiles for this board but has **not been tested on your physical mechanism**. Unknown relay polarity, actuator force direction and component ratings prevent a guarantee of first-upload stabilization. It starts disarmed: calibrate, monitor, test each channel, then review the mechanical findings in REALITY_CHECK.md. Automatic feedback is disabled in the default build. The website uses ideal damping; real relays deliver short ON/OFF pulses.
+The sketch compiles for this board and has had limited COM4 bench checks; **physical stabilization remains unvalidated**. Unknown relay polarity, actuator force direction and component ratings prevent a guarantee of first-upload stabilization. It starts disarmed: calibrate, monitor, test each channel, then review the mechanical findings in REALITY_CHECK.md. This project build permits experimental feedback with ARM, but always boots disarmed. The website uses ideal damping; real relays deliver short ON/OFF pulses.
 
 ## Start here: how to talk to the firmware
 
@@ -14,7 +14,7 @@ You send commands through **Arduino IDE's Serial Monitor**, not by editing the s
 2. Connect the Nano and open Serial Monitor. It usually resets and begins calibration automatically. Keep your hands off the model and wait for the four progress messages, then `CAL OK. MONITOR: outputs disabled.`
 3. Send `HELP` to see the commands. This also keeps automatic outputs disarmed.
 4. Send `CALIBRATE` if you missed startup calibration, moved the sensor, changed its mounting, or received a calibration fault. Hold everything still until `CAL OK` appears. You do not need to send it again if startup calibration succeeded and the mounting has not changed.
-5. Send `STATUS`. For a ready default build, expect `sensor=1 calibrating=0 calibrated=1 fault=0 armed=0` and `experimentalControl=0`. The axis and activeLOW values reflect your settings.
+5. Send `STATUS`. For this project build, expect `sensor=1 calibrating=0 calibrated=1 fault=0 armed=0` and `experimentalControl=1`. The axis and activeLOW values reflect your settings.
 6. Send `STREAM ON`. Watch the numbers while gently moving the platform. This displays measurements; it does **not** enable automatic solenoid response. Send `STREAM OFF` when finished.
 7. With coil power still disconnected, send `TEST1`, wait at least one second, then send `TEST2`. Check the appropriate relay briefly switches and returns OFF. These commands can actuate the solenoids when their power branch is connected, so do not send them casually.
 8. Send `STOP` when finished. Keep automatic control locked until the mechanical checks in `REALITY_CHECK.md` have been completed.
@@ -23,7 +23,7 @@ You send commands through **Arduino IDE's Serial Monitor**, not by editing the s
 
 Place the base flat, allow all motion to stop, then power up and wait for successful calibration. If already powered and you want a fresh baseline, send `STOP`, `STREAM OFF`, then `CALIBRATE` **one at a time**. Wait for `CAL OK`, then check `STATUS`. Start sensing with `STREAM ON`; use individual actuator tests only after the power and direction checks below. At the end, send `STOP` and `STREAM OFF` and turn off the physical supply.
 
-**Default behavior:** the uploaded sketch is a measurement and individual-actuator-test tool. It does not automatically stabilize when you shake the building. `ARM` is deliberately refused in the default build; `CALIBRATE` does not unlock it.
+**Startup behavior:** the sketch boots disarmed for calibration and measurement. This project preserves your enabled experimental-control setting: `ARM` enables feedback after calibration and sustained quiet. Calibration alone never arms it. One automatic pulse is allowed per shaking episode; the controller then waits for sustained quiet, remaining armed.
 
 ## 1. Hardware placement
 
@@ -82,7 +82,7 @@ Avoid simultaneous USB and external 5 V unless the particular Nano's power arran
 6. Open Serial Monitor at **115200 baud**, with **Newline** selected. Opening it normally resets a classic Nano.
 7. Keep the model still for four seconds. Wait for `CAL OK. MONITOR: outputs disabled.` If calibration fails, fix the cause, keep still and send `CAL`.
 
-Do not select Nano Every, Nano 33 or Nano ESP32. Uploading stores the sketch through power cycles, but this version deliberately boots disarmed on every reset. ARM is locked while ENABLE_EXPERIMENTAL_CONTROL is false (the default). There is no standalone arm button or persistent auto-arm mode.
+Do not select Nano Every, Nano 33 or Nano ESP32. Uploading stores the sketch through power cycles, but this version deliberately boots disarmed on every reset. ARM is locked if you set ENABLE_EXPERIMENTAL_CONTROL to false; this project currently sets it to true. There is no standalone arm button or persistent auto-arm mode.
 
 ## 4. Commission step by step
 
@@ -104,9 +104,9 @@ Defaults assume channel 1 gives negative/left force and channel 2 positive/right
 
 ### D. Reality check before feedback
 
-Read `REALITY_CHECK.md`. The default sketch deliberately refuses ARM. It supports passive measurements and individual pulses; no automatic stabilization has been established for the actual mechanism. Opposite forces at opposite row offsets can both produce yaw in the same direction. A delayed pulse can add energy after motion reverses.
+Read `REALITY_CHECK.md`. This build permits ARM but boots disarmed. It supports passive measurements and individual pulses; no automatic stabilization has been established for the actual mechanism. Opposite forces at opposite row offsets can both produce yaw in the same direction. A delayed pulse can add energy after motion reverses.
 
-Only a measured bench-development process should consider changing `ENABLE_EXPERIMENTAL_CONTROL` to true. Even then, the algorithm remains experimental, requires quiet before ARM, and may worsen motion. Compare repeatable passive and controlled trials and STOP if motion or twisting increases. Keep the physical power switch accessible; Serial STOP is not an independent hardware emergency stop.
+The existing `ENABLE_EXPERIMENTAL_CONTROL=true` setting is preserved from your project. Nevertheless, the algorithm remains experimental, requires quiet before ARM, and may worsen motion. Compare repeatable passive and controlled trials and STOP if motion or twisting increases. Keep the physical power switch accessible; Serial STOP is not an independent hardware emergency stop.
 
 ## 5. How the code works
 
@@ -134,7 +134,7 @@ The built-in LED is OFF in monitor/calibration, steady ON when armed, and blinki
 | `TEST1` | During deliberate channel-1 commissioning, initially without coil power | Requests one nominal 40 ms pulse on D8 / IN1. Requires valid calibration, no fault, disarmed state and available pulse budget. No repeated motion is requested. |
 | `TEST2` | During deliberate channel-2 commissioning | Same bounded test on D9 / IN2. Check this channel separately from TEST1. |
 | `STOP` | Before handling the mechanism, after tests, or if behavior is unexpected | Commands both outputs OFF and disarms automatic feedback. Preserves valid calibration and does not stop CSV streaming. An ongoing calibration continues with outputs OFF. Use the physical switch for independent power removal. |
-| `ARM` | Only in a separately enabled, measured experimental-control build | Default response: `ARM locked: experimental feedback not validated. See REALITY_CHECK.md.` If the experimental constant has been enabled, it also requires successful calibration, no fault and at least 700 ms of quiet. It is not a command to start a synthetic earthquake. |
+| `ARM` | Only in a separately enabled, measured experimental-control build | This build enables the experimental constant. ARM requires successful calibration, no fault and at least 700 ms of quiet. It is not a command to start a synthetic earthquake. |
 
 Every nonempty command stops a pulse in progress before processing; STATUS and STREAM preserve the existing arming state. HELP, STOP and calibration disarm. An overlong command disarms. Tests share a rolling budget: a refused test may indicate cooldown or budget exhaustion. Wait at least five seconds after repeated tests, check STATUS, then retry one test if appropriate. Repeated commands do not bypass the budget.
 
@@ -160,7 +160,7 @@ Calibration measures stationary acceleration and gyro baselines and checks still
 | `armed=0` | Automatic feedback is disabled. Individual TEST commands can still pulse when permitted. |
 | `axis=X` or `axis=Y` | Which roof-sensor axis is used for motion estimates. |
 | `activeLOW=1` | Firmware assumes LOW turns a relay ON. This is a setting, not a measurement of the module. |
-| `experimentalControl=0` | The default build locks ARM. |
+| `experimentalControl=0` | Feedback was disabled at compile time; this project normally reports 1. |
 
 ### Reading STREAM output
 
@@ -200,7 +200,7 @@ For normal use, send commands; no source edit or re-upload is needed. Editing co
 
 Read [CONTROL_RESEARCH.md](CONTROL_RESEARCH.md) for the research, assumptions and tests. The experimental controller now waits for a consistent estimated direction, allows at most one pulse per confirmed half-cycle, skips pulses when a simple prediction approaches reversal, and requests OFF earlier to allow for release delay. Calibration sets noise-based acceleration thresholds above fixed minimums. Live operation uses only the selected horizontal axis. Tilt, yaw, vertical/other-axis motion and measurement clipping do not fault, disarm or inhibit the controller.
 
-These changes may produce **fewer pulses**, which is intentional. TEST1/TEST2 remain individual hardware-characterization pulses and bypass the automatic direction/prediction selection. Do not repeatedly send TEST commands to simulate damping. The default automatic-control lock is unchanged.
+These changes may produce **fewer pulses**, which is intentional. TEST1/TEST2 remain individual hardware-characterization pulses and bypass the automatic direction/prediction selection. Do not repeatedly send TEST commands to simulate damping. This project preserves your enabled experimental setting; it still boots disarmed.
 
 STATUS now also reports `noiseSigma_m_s2`, `start` and `quiet`: measured stationary acceleration noise and the effective acceleration thresholds in m/s². Sensor communication, configuration and stale-data faults still disable outputs. Calibration still requires a flat, stationary model before use.
 
@@ -230,7 +230,7 @@ Use stationary logs to set thresholds above noise; change one parameter at a tim
 - **MPU not found:** check specified supply, ground, A4/A5, AD0, logic levels and I2C pull-ups. Do not raise voltage blindly.
 - **Calibration fault:** hold the secured sensor still; mount it flat with Z upward; send CAL.
 - **Sampling fault:** check short, secure I2C wiring, separation from coils and supply integrity.
-- **ARM refused:** expected in the default build. Read REALITY_CHECK.md; do not bypass the lock without measured commissioning.
+- **ARM refused:** check successful calibration, sensor health and sustained quiet. A build with ENABLE_EXPERIMENTAL_CONTROL=false also refuses ARM.
 - **No actuator movement:** check polarity, COM/NO, supply, pulse budget and actual ratings. Do not extend pulses beyond coil limits.
 - **Continuous/chattering relays:** STOP; inspect polarity, noise and uploaded settings. Defaults do not command continuous energization.
 - **Motion worsens:** STOP; verify resulting force sign, sensor orientation, release delay, contacts and yaw.
@@ -239,8 +239,86 @@ Use stationary logs to set thresholds above noise; change one parameter at a tim
 
 [Arduino Nano](https://docs.arduino.cc/hardware/nano/), [TDK MPU6050 register map](https://invensense.tdk.com/wp-content/uploads/2015/02/MPU-6000-Register-Map1.pdf), [Arduino AVR Wire](https://github.com/arduino/ArduinoCore-avr/tree/master/libraries/Wire).
 
-Compiled with `arduino-cli compile --fqbn arduino:avr:nano:cpu=atmega328 SEDAR_Nano`, AVR core 1.8.6. No physical device was flashed or stability-tested during preparation.
+Compiled with `arduino-cli compile --fqbn arduino:avr:nano:cpu=atmega328 SEDAR_Nano`, AVR core 1.8.6. The sensitivity/settling update was uploaded to the connected Nano on COM4 on 2026-09-22. Calibration passed. This does not establish physical stability.
 
 ## Horizontal-only live demonstration update
 
 After successful calibration, the code responds only to `MOTION_AXIS` (0 = X, default; 1 = Y if that axis physically points left/right). Align the chosen roof-sensor axis with the solenoid travel. Vertical motion and gyro rotation do not enter the live control decisions. Motion reaching sensor range limits can clip the data but no longer causes a fault. Calibration still checks all axes while the model is flat and stationary. Movement does not clear ARM; explicit STOP, calibration, and genuine sensor/bus faults retain their existing behavior. Existing pulse/cooldown/duty/episode limits and the compile-time ARM setting are unchanged.
+## Adjustable sensitivity (Serial Monitor)
+
+Use **115200 baud** and **Newline**. Send each command separately:
+
+```text
+STOP
+SENS 1
+STATUS
+```
+
+`SENS 1` is gentle: it requires more horizontal motion before acting. `SENS 2`
+is normal. `SENS 3` is sensitive (the startup default): it responds to smaller
+movements. `SENS` without a number displays the current setting. Levels change
+acceleration and estimated-velocity admission thresholds, not solenoid force,
+pulse duration, cooldown or thermal limits. Calibration's measured noise floor
+still applies. Settings are kept in RAM and return to sensitive level 3 after reset.
+
+Start with level 1 when the actuators appear to make shaking worse. Keep the base
+still after changing the level, then send `ARM` only after checking the actuator
+force directions and the build's experimental-control setting. Sensitivity
+changes are refused while armed: use `STOP` first. `CALIBRATE` keeps the selected
+level and recomputes the sensor noise floor; it does not arm the controller.
+
+**Sensitivity cannot correct a reversed force direction, delayed rod contact,
+twisting or recoil.** Compare a passive shake with a similar powered trial.
+If powered motion increases, send `STOP` and investigate the mechanics and
+channel direction before continuing. A roof accelerometer and two relays cannot
+establish guaranteed damping from sensitivity adjustment alone.
+
+
+
+## Settling update: prevent repeated actuator kicks
+
+After the first admitted automatic pulse, both relays are kept off once that pulse
+ends, until the sensor detects at least 700 ms of uninterrupted quiet. The Nano
+stays armed throughout; ordinary horizontal/vertical movement does not disarm it.
+The pulse may end early when the velocity prediction no longer supports it.
+Direction changes and the old cooldown alone cannot admit another pulse during
+the settling wait. A fresh movement after sustained quiet can start a new episode.
+This deliberately sacrifices repeated correction during a long shake to avoid
+repeatedly exciting this uncharacterized spring/solenoid assembly.
+
+The default sensitivity is **SENS 3 (sensitive)**, following your request for more response. Levels 1 and 2 were judged too unresponsive during the bench trials. The stationary-noise floor still applies. Pulse length remains capped
+at 40 ms; interlock, cooldown, thermal budget and real sensor/bus fault handling
+remain in place. TEST1/TEST2 are manual commissioning commands and bypass the
+automatic settling gate; do not repeatedly send them to imitate damping.
+
+During the COM4 bench check, a single channel-1 test produced approximately
+2.61 m/s² peak sampled filtered horizontal acceleration; channel 2 produced
+approximately 1.56 m/s². These are 10 Hz telemetry samples, not true impulse
+peaks or force measurements. Channel 1's visible direction was unclear or
+twisting; channel 2 visibly nudged right. This is evidence of actuator-induced
+motion, not proof of stabilizing force direction or a measured damping ratio.
+Sensitivity and pulse admission cannot eliminate mechanical twisting or recoil.
+
+`STATUS` now includes `pulsesSinceReset ch1=... ch2=... waitingForQuiet=...`.
+Counts include manual and automatic pulses and survive CAL/STOP until reset.
+`waitingForQuiet=1` means the controller is withholding additional automatic
+pulses so the building can settle; it does not mean the Nano has disarmed.
+
+The live trial also recorded an actual `Sensor read failure` during movement.
+Recalibration recovered communication. This is distinct from a motion/tilt
+fault: secure the roof sensor's power, ground, SDA and SCL connections and give
+moving wires enough slack. The firmware continues to stop on missing sensor
+data; tuning sensitivity cannot fix an intermittent electrical connection.
+
+Diagnostic commands are processed one at a time. Because lengthy console output
+pauses sampling, the controller stops outputs, discards the unobserved velocity
+interval and resumes with fresh samples. This avoids a false sampling-stall fault
+from STATUS/HELP text; real I2C failures and unaccounted sampling stalls still stop
+the outputs. Avoid sending continuous diagnostics during a demonstration.
+
+At normal sensitivity the recorded movement reached about 8.4 m/s² and the
+counter showed three channel-2 pulses across the recording, so lack of visible
+correction did not mean that the sensor failed to detect motion. A larger mass,
+contact geometry and brief actuation can limit the visible response. Increasing
+sensitivity lowers admission thresholds; it cannot increase actuator force or
+prove that a pulse removes mechanical energy.
